@@ -145,7 +145,7 @@
               ;
             xilinxShell = doctor.xilinxShell;
             pnamePrefix = "aurora-loopback";
-            projectName = "example_14_aurora_loopback";
+            projectName = "peer_stream_loopback";
             boards = {
               u280 = {
                 inherit (doctor.boards.u280) xilinxVersion simXilinxVersion;
@@ -220,7 +220,7 @@
             simPackageRuntime,
             simSession,
             simWorkspaceSuffix ? board.board,
-            simProjectName ? "example_14_aurora_loopback.xpr",
+            simProjectName ? "peer_stream_loopback.xpr",
           }:
           coyoteNix.lib.mkCoyoteDevShell {
             inherit
@@ -269,7 +269,7 @@
             board = doctor.boards.u280;
             fpgaPackage = "aurora-loopback-u280";
             fpgaArtifact = "cyt_top.bit";
-            simPackageProject = packagePath "aurora-loopback-u280-sim" "project/sim/example_14_aurora_loopback.xpr";
+            simPackageProject = packagePath "aurora-loopback-u280-sim" "project/sim/peer_stream_loopback.xpr";
             simPackageRuntime = packagePath "aurora-loopback-u280-sim" "project/sim";
             simSession = "aurora-ultrascale";
             simWorkspaceSuffix = "aurora-u280";
@@ -279,7 +279,7 @@
             board = doctor.boards.u280;
             fpgaPackage = "aurora-loopback-u280";
             fpgaArtifact = "cyt_top.bit";
-            simPackageProject = packagePath "aurora-loopback-u280-sim" "project/sim/example_14_aurora_loopback.xpr";
+            simPackageProject = packagePath "aurora-loopback-u280-sim" "project/sim/peer_stream_loopback.xpr";
             simPackageRuntime = packagePath "aurora-loopback-u280-sim" "project/sim";
             simSession = "aurora-ultrascale";
             simWorkspaceSuffix = "aurora-u280";

@@ -1,20 +1,19 @@
 /**
- * Coyote Example 14: Aurora 64B/66B FPGA-to-FPGA Loopback
+ * Coyote peer-stream loopback test.
  *
- * User logic for the Aurora-loopback example. The vFPGA has access to:
- *   - axis_aurora_rx  : 256-bit AXI4-Stream from the Aurora RX path (aclk domain)
- *   - axis_aurora_tx  : 256-bit AXI4-Stream into Aurora TX path
- *   - aurora_channel_up, aurora_lane_up[3:0] : link status from Aurora IP
+ * User logic for exercising the optional Coyote peer abstraction. With the
+ * prototype host_stream backend, host stream 1 is hidden by Coyote and exposed
+ * here as:
+ *   - axis_peer_recv[0] : fake peer -> vFPGA
+ *   - axis_peer_send[0] : vFPGA -> fake peer
+ *   - peer_link_up[0], peer_lane_up[3:0] : backend status
  *
  * Host control flow (via axi_ctrl, 64-bit register slots):
  *   reg[0]  CTRL          : bit0=TX start, bit1=RX arm
- *   reg[1]  STATUS        : bit0=tx_done, bit1=rx_done, bit2=channel_up, bits[6:3]=lane_up
- *   reg[2]  TX_BURST_BEATS: number of 256-bit beats to send (host-supplied)
- *   reg[3]  RX_BEAT_CNT   : observed RX beat count (read-only)
- *   reg[4]  RX_MISMATCHES : count of beats where expected pattern != received (read-only)
- *
- * On the rose side, set CTRL bit 0 to fire a burst of N beats with payload {beat_idx, beat_idx, ...}
- * On the clara side, set CTRL bit 1 to arm RX. Then check RX_BEAT_CNT and RX_MISMATCHES.
+ *   reg[1]  STATUS        : bit0=tx_done, bit1=rx_done, bit2=peer_link_up, bits[6:3]=peer_lane_up
+ *   reg[2]  TX_BURST_BEATS: number of 256-bit beats to send
+ *   reg[3]  RX_BEAT_CNT   : observed RX beat count
+ *   reg[4]  RX_MISMATCHES : count of beats where expected pattern != received
  */
 
 // =========================================================================
@@ -27,10 +26,14 @@ localparam int REG_ADDR_BITS  = ADDR_LSB + ADDR_MSB;
 
 logic [63:0] csr [N_REGS-1:0];
 
-// Convenience aliases
-wire        tx_start   = csr[0][0];
-wire        rx_arm     = csr[0][1];
+wire        tx_start       = csr[0][0];
+wire        rx_arm         = csr[0][1];
 wire [63:0] tx_burst_beats = csr[2];
+wire        peer_up        = peer_link_up[0];
+wire [3:0]  peer_lanes     = peer_lane_up[3:0];
+
+logic [63:0] status_reg;
+logic [63:0] read_data;
 
 // Tiny AXI4-Lite slave (read/write only, no error/burst handling)
 logic [REG_ADDR_BITS-1:0] aw_addr_q, ar_addr_q;
@@ -48,9 +51,13 @@ always_ff @(posedge aclk) begin
         end
         // Write data
         if (axi_ctrl.wvalid && !w_seen) w_seen <= 1'b1;
-        // Commit write
+        // Commit write. Status registers are read-only from the host's point of view.
         if (aw_seen && w_seen && axi_ctrl.bready) begin
-            csr[aw_addr_q[REG_ADDR_BITS-1:ADDR_LSB]] <= axi_ctrl.wdata;
+            if (aw_addr_q[REG_ADDR_BITS-1:ADDR_LSB] != 1
+                && aw_addr_q[REG_ADDR_BITS-1:ADDR_LSB] != 3
+                && aw_addr_q[REG_ADDR_BITS-1:ADDR_LSB] != 4) begin
+                csr[aw_addr_q[REG_ADDR_BITS-1:ADDR_LSB]] <= axi_ctrl.wdata;
+            end
             aw_seen <= 1'b0; w_seen <= 1'b0;
         end
         // Read address
@@ -69,11 +76,11 @@ assign axi_ctrl.bvalid  = aw_seen && w_seen;
 assign axi_ctrl.bresp   = 2'b00;
 assign axi_ctrl.arready = !ar_seen;
 assign axi_ctrl.rvalid  = ar_seen;
-assign axi_ctrl.rdata   = csr[ar_addr_q[REG_ADDR_BITS-1:ADDR_LSB]];
+assign axi_ctrl.rdata   = read_data;
 assign axi_ctrl.rresp   = 2'b00;
 
 // =========================================================================
-// TX path: send `tx_burst_beats` counter-pattern beats over Aurora
+// TX path: send `tx_burst_beats` counter-pattern beats over peer_send[0]
 // =========================================================================
 logic [63:0] tx_beat_idx;
 logic        tx_running;
@@ -89,7 +96,7 @@ always_ff @(posedge aclk) begin
             tx_running  <= 1'b1;
             tx_beat_idx <= '0;
         end
-        if (tx_running && axis_aurora_tx.tready) begin
+        if (tx_running && axis_peer_send[0].tready) begin
             tx_beat_idx <= tx_beat_idx + 1;
             if (tx_beat_idx + 1 == tx_burst_beats) begin
                 tx_running <= 1'b0;
@@ -100,13 +107,14 @@ always_ff @(posedge aclk) begin
     end
 end
 
-assign axis_aurora_tx.tvalid = tx_running && aurora_channel_up;
-assign axis_aurora_tx.tdata  = {4{tx_beat_idx}};  // 256 bits = 4 copies of beat idx
-assign axis_aurora_tx.tkeep  = '1;
-assign axis_aurora_tx.tlast  = tx_running && (tx_beat_idx + 1 == tx_burst_beats);
+assign axis_peer_send[0].tvalid = tx_running && peer_up;
+assign axis_peer_send[0].tdata  = {4{tx_beat_idx}};  // 256 bits = 4 copies of beat idx
+assign axis_peer_send[0].tkeep  = '1;
+assign axis_peer_send[0].tlast  = tx_running && (tx_beat_idx + 1 == tx_burst_beats);
+assign axis_peer_send[0].tid    = '0;
 
 // =========================================================================
-// RX path: count beats, check pattern, count mismatches
+// RX path: count beats from peer_recv[0], check pattern, count mismatches
 // =========================================================================
 logic [63:0] rx_beat_cnt;
 logic [63:0] rx_mismatches;
@@ -117,24 +125,26 @@ always_ff @(posedge aclk) begin
         rx_beat_cnt   <= '0;
         rx_mismatches <= '0;
         rx_done       <= 1'b0;
-    end else if (axis_aurora_rx.tvalid && axis_aurora_rx.tready) begin
+    end else if (axis_peer_recv[0].tvalid && axis_peer_recv[0].tready) begin
         rx_beat_cnt <= rx_beat_cnt + 1;
-        // Each beat should be {4{rx_beat_cnt}}; mismatch increments counter
-        if (axis_aurora_rx.tdata != {4{rx_beat_cnt}}) begin
+        // Each beat should be {4{rx_beat_cnt}}; mismatch increments counter.
+        if (axis_peer_recv[0].tdata != {4{rx_beat_cnt}}) begin
             rx_mismatches <= rx_mismatches + 1;
         end
-        if (axis_aurora_rx.tlast) rx_done <= 1'b1;
+        if (axis_peer_recv[0].tlast) rx_done <= 1'b1;
     end
 end
 
-assign axis_aurora_rx.tready = rx_arm;
+assign axis_peer_recv[0].tready = rx_arm;
 
-// Live status registers (read-only side)
 always_comb begin
-    // bit0=tx_done, bit1=rx_done, bit2=channel_up, bits[6:3]=lane_up
-    csr[1] = {57'b0, aurora_lane_up, aurora_channel_up, rx_done, tx_done};
-    csr[3] = rx_beat_cnt;
-    csr[4] = rx_mismatches;
+    status_reg = {57'b0, peer_lanes, peer_up, rx_done, tx_done};
+    unique case (ar_addr_q[REG_ADDR_BITS-1:ADDR_LSB])
+        1: read_data = status_reg;
+        3: read_data = rx_beat_cnt;
+        4: read_data = rx_mismatches;
+        default: read_data = csr[ar_addr_q[REG_ADDR_BITS-1:ADDR_LSB]];
+    endcase
 end
 
 // =========================================================================
