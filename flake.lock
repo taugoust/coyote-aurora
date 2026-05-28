@@ -36,11 +36,11 @@
     "coyote": {
       "flake": false,
       "locked": {
-        "lastModified": 1779976185,
-        "narHash": "sha256-i4UYZgkrOd2/kzvqDoYwo1SPl9JVsn1W+LBRU/ryl6Q=",
+        "lastModified": 1779981188,
+        "narHash": "sha256-wjbh9DtWBKiNQi7Y9SCmnniLZdLAPtIa2bgyIKCbh9g=",
         "owner": "taugoust",
         "repo": "Coyote",
-        "rev": "53838d5ee44fcc3c3b63939392315e4a3832a48d",
+        "rev": "33a4a36d3b0aaaa6532444118246cdfe00421728",
         "type": "github"
       },
       "original": {
@@ -581,11 +581,11 @@
     },
     "nixpkgs_2": {
       "locked": {
-        "lastModified": 1779467186,
-        "narHash": "sha256-nOesoDCiXcUftqbRBMz9tt4blI5PvljMWbm3kuCA+0s=",
+        "lastModified": 1779796641,
+        "narHash": "sha256-ZsIrKmhp4vbBXoXXmR/tBXA/UCsAQiJL9vsgZEduhVY=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "b77b3de8775677f84492abe84635f87b0e153f0f",
+        "rev": "25f538306313eae3927264466c70d7001dcea1df",
         "type": "github"
       },
       "original": {
