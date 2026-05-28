@@ -7,7 +7,11 @@
 ######################################################################################
 
 cmake_minimum_required(VERSION 3.5)
-set(CYT_DIR ${CMAKE_SOURCE_DIR}/../../../)
+if(DEFINED ENV{COYOTE_ROOT} AND EXISTS "$ENV{COYOTE_ROOT}/cmake")
+    set(CYT_DIR $ENV{COYOTE_ROOT})
+else()
+    set(CYT_DIR ${CMAKE_SOURCE_DIR}/../../../)
+endif()
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CYT_DIR}/cmake)
 find_package(CoyoteHW REQUIRED)
 

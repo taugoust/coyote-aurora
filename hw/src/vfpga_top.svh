@@ -11,7 +11,7 @@
  * Host control flow (via axi_ctrl, 64-bit register slots):
  *   reg[0]  CTRL          : bit0=TX start, bit1=RX arm
  *   reg[1]  STATUS        : bit0=tx_done, bit1=rx_done, bit2=peer_link_up, bits[6:3]=peer_lane_up
- *   reg[2]  TX_BURST_BEATS: number of 256-bit beats to send
+ *   reg[2]  TX_BURST_BEATS: number of AXI_DATA_BITS-wide beats to send
  *   reg[3]  RX_BEAT_CNT   : observed RX beat count
  *   reg[4]  RX_MISMATCHES : count of beats where expected pattern != received
  */
@@ -36,47 +36,69 @@ logic [63:0] status_reg;
 logic [63:0] read_data;
 
 // Tiny AXI4-Lite slave (read/write only, no error/burst handling)
-logic [REG_ADDR_BITS-1:0] aw_addr_q, ar_addr_q;
-logic                     aw_seen, w_seen, ar_seen;
+logic [REG_ADDR_BITS-1:0] aw_addr_q;
+logic [63:0]              w_data_q;
+logic                     aw_seen, w_seen;
+logic                     bvalid_q, rvalid_q;
+logic [63:0]              rdata_q;
+
+function automatic logic [63:0] csr_read_value(input logic [ADDR_MSB-1:0] idx);
+    unique case (idx)
+        1: csr_read_value = status_reg;
+        3: csr_read_value = rx_beat_cnt;
+        4: csr_read_value = rx_mismatches;
+        default: csr_read_value = csr[idx];
+    endcase
+endfunction
 
 always_ff @(posedge aclk) begin
     if (!aresetn) begin
-        aw_seen <= 1'b0; w_seen <= 1'b0; ar_seen <= 1'b0;
+        aw_seen  <= 1'b0;
+        w_seen   <= 1'b0;
+        bvalid_q <= 1'b0;
+        rvalid_q <= 1'b0;
+        rdata_q  <= '0;
         for (int i = 0; i < N_REGS; i++) csr[i] <= '0;
     end else begin
-        // Write address
-        if (axi_ctrl.awvalid && !aw_seen) begin
+        if (axi_ctrl.awvalid && axi_ctrl.awready) begin
             aw_addr_q <= axi_ctrl.awaddr[REG_ADDR_BITS-1:0];
             aw_seen   <= 1'b1;
         end
-        // Write data
-        if (axi_ctrl.wvalid && !w_seen) w_seen <= 1'b1;
-        // Commit write. Status registers are read-only from the host's point of view.
-        if (aw_seen && w_seen && axi_ctrl.bready) begin
+
+        if (axi_ctrl.wvalid && axi_ctrl.wready) begin
+            w_data_q <= axi_ctrl.wdata;
+            w_seen   <= 1'b1;
+        end
+
+        if (aw_seen && w_seen && !bvalid_q) begin
             if (aw_addr_q[REG_ADDR_BITS-1:ADDR_LSB] != 1
                 && aw_addr_q[REG_ADDR_BITS-1:ADDR_LSB] != 3
                 && aw_addr_q[REG_ADDR_BITS-1:ADDR_LSB] != 4) begin
-                csr[aw_addr_q[REG_ADDR_BITS-1:ADDR_LSB]] <= axi_ctrl.wdata;
+                csr[aw_addr_q[REG_ADDR_BITS-1:ADDR_LSB]] <= w_data_q;
             end
-            aw_seen <= 1'b0; w_seen <= 1'b0;
+            aw_seen  <= 1'b0;
+            w_seen   <= 1'b0;
+            bvalid_q <= 1'b1;
+        end else if (bvalid_q && axi_ctrl.bready) begin
+            bvalid_q <= 1'b0;
         end
-        // Read address
-        if (axi_ctrl.arvalid && !ar_seen) begin
-            ar_addr_q <= axi_ctrl.araddr[REG_ADDR_BITS-1:0];
-            ar_seen   <= 1'b1;
+
+        if (axi_ctrl.arvalid && axi_ctrl.arready) begin
+            rdata_q  <= csr_read_value(axi_ctrl.araddr[REG_ADDR_BITS-1:ADDR_LSB]);
+            rvalid_q <= 1'b1;
+        end else if (rvalid_q && axi_ctrl.rready) begin
+            rvalid_q <= 1'b0;
         end
-        // Drop read-handshake once rready
-        if (ar_seen && axi_ctrl.rready) ar_seen <= 1'b0;
     end
 end
 
-assign axi_ctrl.awready = !aw_seen;
-assign axi_ctrl.wready  = !w_seen;
-assign axi_ctrl.bvalid  = aw_seen && w_seen;
+assign axi_ctrl.awready = !aw_seen && !bvalid_q;
+assign axi_ctrl.wready  = !w_seen && !bvalid_q;
+assign axi_ctrl.bvalid  = bvalid_q;
 assign axi_ctrl.bresp   = 2'b00;
-assign axi_ctrl.arready = !ar_seen;
-assign axi_ctrl.rvalid  = ar_seen;
-assign axi_ctrl.rdata   = read_data;
+assign axi_ctrl.arready = !rvalid_q;
+assign axi_ctrl.rvalid  = rvalid_q;
+assign axi_ctrl.rdata   = rdata_q;
 assign axi_ctrl.rresp   = 2'b00;
 
 // =========================================================================
@@ -108,7 +130,7 @@ always_ff @(posedge aclk) begin
 end
 
 assign axis_peer_send[0].tvalid = tx_running && peer_up;
-assign axis_peer_send[0].tdata  = {4{tx_beat_idx}};  // 256 bits = 4 copies of beat idx
+assign axis_peer_send[0].tdata  = {AXI_DATA_BITS/64{tx_beat_idx}};
 assign axis_peer_send[0].tkeep  = '1;
 assign axis_peer_send[0].tlast  = tx_running && (tx_beat_idx + 1 == tx_burst_beats);
 assign axis_peer_send[0].tid    = '0;
@@ -127,8 +149,8 @@ always_ff @(posedge aclk) begin
         rx_done       <= 1'b0;
     end else if (axis_peer_recv[0].tvalid && axis_peer_recv[0].tready) begin
         rx_beat_cnt <= rx_beat_cnt + 1;
-        // Each beat should be {4{rx_beat_cnt}}; mismatch increments counter.
-        if (axis_peer_recv[0].tdata != {4{rx_beat_cnt}}) begin
+        // Each beat should repeat the expected 64-bit beat index across tdata.
+        if (axis_peer_recv[0].tdata != {AXI_DATA_BITS/64{rx_beat_cnt}}) begin
             rx_mismatches <= rx_mismatches + 1;
         end
         if (axis_peer_recv[0].tlast) rx_done <= 1'b1;
@@ -139,12 +161,7 @@ assign axis_peer_recv[0].tready = rx_arm;
 
 always_comb begin
     status_reg = {57'b0, peer_lanes, peer_up, rx_done, tx_done};
-    unique case (ar_addr_q[REG_ADDR_BITS-1:ADDR_LSB])
-        1: read_data = status_reg;
-        3: read_data = rx_beat_cnt;
-        4: read_data = rx_mismatches;
-        default: read_data = csr[ar_addr_q[REG_ADDR_BITS-1:ADDR_LSB]];
-    endcase
+    read_data = '0;
 end
 
 // =========================================================================
