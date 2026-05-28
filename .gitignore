@@ -1,0 +1,17 @@
+# direnv outputs
+.direnv
+
+# C++ compilation outputs
+.cache
+.build
+compile_commands.json
+
+# Nix outputs
+result
+
+# Misc
+.pi
+.plans
+
+# Verilog
+verible.filelist
