@@ -1,11 +1,12 @@
 /**
- * Coyote peer-stream host-backed loopback test.
+ * Coyote peer-stream loopback / Aurora bring-up host app.
  *
- * This drives the optional Coyote peer abstraction when PEER_BACKEND=host_stream.
- * Host stream destination 0 remains the normal host-facing stream; destination 1
- * is hidden behind axis_peer_recv[0] / axis_peer_send[0]. This app sends a
- * counter-pattern burst through destination 1 and verifies that the vFPGA sees
- * and returns it through the peer interface.
+ * Supports two modes:
+ *   - host-loopback: single-board PEER_BACKEND=host_stream test using Coyote
+ *     LOCAL_TRANSFER on host destination 1.
+ *   - tx/rx: two-board PEER_BACKEND=aurora_qsfp1 test. One board runs tx, the
+ *     other runs rx. The public FPGA interface remains the generic peer CSR and
+ *     axis_peer_* abstraction; no Aurora-specific CSR names are exposed here.
  *
  * Register map (CSR index = byte_offset / 8):
  *   0: CTRL           (bit0=TX start, bit1=RX arm)
@@ -13,6 +14,8 @@
  *   2: TX_BURST_BEATS (AXI_DATA_BITS-wide beats to send)
  *   3: RX_BEAT_CNT    (read-only)
  *   4: RX_MISMATCHES  (read-only)
+ *   5: TX_BEAT_CNT    (read-only debug counter)
+ *   6: TX_RUNNING     (read-only debug flag)
  */
 
 #include <algorithm>
@@ -22,7 +25,7 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
-#include <stdexcept>
+#include <string>
 #include <thread>
 #include <unistd.h>
 #include <vector>
@@ -99,29 +102,139 @@ static bool wait_for_completion(coyote::cThread& t, std::chrono::milliseconds ti
     return false;
 }
 
-static uint64_t wait_for_done_status(coyote::cThread& t, std::chrono::milliseconds timeout) {
+static uint64_t wait_for_status_bits(coyote::cThread& t, uint64_t mask, std::chrono::milliseconds timeout) {
     auto deadline = std::chrono::steady_clock::now() + timeout;
     uint64_t status = 0;
     while (std::chrono::steady_clock::now() < deadline) {
         status = t.getCSR(REG_STATUS);
-        const bool tx_done = (status >> 0) & 0x1;
-        const bool rx_done = (status >> 1) & 0x1;
-        const bool peer_up = (status >> 2) & 0x1;
-        if (tx_done && rx_done && peer_up) {
-            return status;
-        }
-        std::this_thread::sleep_for(std::chrono::microseconds(100));
+        if ((status & mask) == mask) return status;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     return status;
 }
 
+static bool verify_csr_write(coyote::cThread& t, uint32_t reg, uint64_t value, const char* name) {
+    t.setCSR(value, reg);
+    const uint64_t readback = t.getCSR(reg);
+    if (readback != value) {
+        std::cerr << "[FAIL] " << name << " CSR readback mismatch: wrote " << value
+                  << ", read " << readback << "\n";
+        return false;
+    }
+    return true;
+}
+
+static int run_host_loopback(coyote::cThread& t, uint64_t beats, std::chrono::milliseconds timeout) {
+    const auto payload = make_counter_pattern(beats);
+    const auto n_bytes = static_cast<uint32_t>(payload.size());
+
+    std::cout << "Mode:        host-loopback\n"
+              << "Bytes:       " << n_bytes << "\n"
+              << "Peer dest:   " << PEER_HOST_DEST << "\n";
+
+    auto* src_mem = reinterpret_cast<uint8_t*>(t.getMem({coyote::CoyoteAllocType::HPF, n_bytes}));
+    auto* dst_mem = reinterpret_cast<uint8_t*>(t.getMem({coyote::CoyoteAllocType::HPF, n_bytes}));
+    if (!src_mem || !dst_mem) {
+        std::cerr << "failed to allocate Coyote buffers\n";
+        return 1;
+    }
+
+    std::memcpy(src_mem, payload.data(), payload.size());
+    std::memset(dst_mem, 0, payload.size());
+
+    coyote::localSg src_sg = {.addr = src_mem, .len = n_bytes, .stream = coyote::STRM_HOST, .dest = PEER_HOST_DEST};
+    coyote::localSg dst_sg = {.addr = dst_mem, .len = n_bytes, .stream = coyote::STRM_HOST, .dest = PEER_HOST_DEST};
+
+    t.clearCompleted();
+    if (!verify_csr_write(t, REG_TX_BURST, beats, "TX_BURST_BEATS")) return 1;
+    if (!verify_csr_write(t, REG_CTRL, CTRL_TX_START | CTRL_RX_ARM, "CTRL")) return 1;
+    t.invoke(coyote::CoyoteOper::LOCAL_TRANSFER, src_sg, dst_sg);
+
+    if (!wait_for_completion(t, timeout)) {
+        std::cerr << "[FAIL] timed out waiting for LOCAL_TRANSFER completion\n";
+        print_status(t.getCSR(REG_STATUS));
+        return 1;
+    }
+
+    const uint64_t status = wait_for_status_bits(t, CTRL_TX_START | CTRL_RX_ARM | (1ULL << 2), timeout);
+    const uint64_t rx_beats = t.getCSR(REG_RX_BEATS);
+    const uint64_t mismatches = t.getCSR(REG_RX_MISMATCH);
+    const uint64_t tx_beats = t.getCSR(REG_TX_BEATS);
+    const uint64_t tx_running = t.getCSR(REG_TX_RUNNING);
+
+    std::cout << "[status]\n";
+    print_status(status);
+    std::cout << "[rx] beats=" << rx_beats << " mismatches=" << mismatches << "\n";
+    std::cout << "[tx] beats=" << tx_beats << " running=" << tx_running << "\n";
+
+    bool ok = true;
+    if (((status >> 1) & 1U) == 0 || ((status >> 2) & 1U) == 0) ok = false;
+    if (rx_beats != beats || mismatches != 0) ok = false;
+    if (!std::equal(payload.begin(), payload.end(), dst_mem)) ok = false;
+
+    t.setCSR(0, REG_CTRL);
+    if (!ok) {
+        std::cerr << "*** FAIL ***\n";
+        return 1;
+    }
+    std::cout << "*** PASS: host-backed peer stream loopback completed ***\n";
+    return 0;
+}
+
+static int run_rx(coyote::cThread& t, uint64_t beats, std::chrono::milliseconds timeout) {
+    std::cout << "Mode:        rx\n";
+    if (!verify_csr_write(t, REG_TX_BURST, beats, "TX_BURST_BEATS")) return 1;
+    if (!verify_csr_write(t, REG_CTRL, CTRL_RX_ARM, "CTRL")) return 1;
+
+    const uint64_t status = wait_for_status_bits(t, (1ULL << 1) | (1ULL << 2), timeout);
+    const uint64_t rx_beats = t.getCSR(REG_RX_BEATS);
+    const uint64_t mismatches = t.getCSR(REG_RX_MISMATCH);
+
+    std::cout << "[status]\n";
+    print_status(status);
+    std::cout << "[rx] beats=" << rx_beats << " mismatches=" << mismatches << "\n";
+
+    t.setCSR(0, REG_CTRL);
+    if (((status >> 1) & 1U) && ((status >> 2) & 1U) && rx_beats == beats && mismatches == 0) {
+        std::cout << "*** PASS: received " << beats << " peer beats with no mismatch ***\n";
+        return 0;
+    }
+    std::cerr << "*** FAIL ***\n";
+    return 1;
+}
+
+static int run_tx(coyote::cThread& t, uint64_t beats, std::chrono::milliseconds timeout) {
+    std::cout << "Mode:        tx\n";
+    if (!verify_csr_write(t, REG_TX_BURST, beats, "TX_BURST_BEATS")) return 1;
+    if (!verify_csr_write(t, REG_CTRL, CTRL_TX_START, "CTRL")) return 1;
+
+    const uint64_t status = wait_for_status_bits(t, (1ULL << 0) | (1ULL << 2), timeout);
+    const uint64_t tx_beats = t.getCSR(REG_TX_BEATS);
+    const uint64_t tx_running = t.getCSR(REG_TX_RUNNING);
+
+    std::cout << "[status]\n";
+    print_status(status);
+    std::cout << "[tx] beats=" << tx_beats << " running=" << tx_running << "\n";
+
+    t.setCSR(0, REG_CTRL);
+    if (((status >> 0) & 1U) && ((status >> 2) & 1U) && tx_beats == beats && tx_running == 0) {
+        std::cout << "*** PASS: transmitted " << beats << " peer beats ***\n";
+        return 0;
+    }
+    std::cerr << "*** FAIL ***\n";
+    return 1;
+}
+
 int main(int argc, char* argv[]) {
+    std::string role;
     uint64_t beats;
     int timeout_ms;
 
-    po::options_description desc("Coyote peer-stream loopback");
+    po::options_description desc("Coyote peer-stream loopback / Aurora bring-up");
     desc.add_options()
         ("help,h", "show help")
+        ("role,r", po::value<std::string>(&role)->default_value("rx"),
+         "Mode: rx, tx, or host-loopback")
         ("beats,n", po::value<uint64_t>(&beats)->default_value(1024),
          "Number of AXI_DATA_BITS-wide beats to send / expect")
         ("timeout-ms", po::value<int>(&timeout_ms)->default_value(10000),
@@ -135,111 +248,23 @@ int main(int argc, char* argv[]) {
         std::cout << desc << "\n";
         return 0;
     }
-
     if (beats == 0) {
         std::cerr << "beats must be greater than zero\n";
         return 2;
     }
 
-    const auto timeout = std::chrono::milliseconds(timeout_ms);
-    const auto payload = make_counter_pattern(beats);
-    const auto n_bytes = static_cast<uint32_t>(payload.size());
-
-    std::cout << "=== Coyote peer-stream loopback ===\n"
-              << "Beats:       " << beats << "\n"
-              << "Bytes:       " << n_bytes << "\n"
-              << "Peer dest:   " << PEER_HOST_DEST << "\n";
+    std::cout << "=== Coyote peer-stream bring-up ===\n"
+              << "Role:        " << role << "\n"
+              << "Beats:       " << beats << "\n";
 
     coyote::cThread t(DEFAULT_VFPGA_ID, getpid());
-
     if (!wait_for_peer_up(t, timeout_ms)) return 1;
 
-    auto* src_mem = reinterpret_cast<uint8_t*>(t.getMem({coyote::CoyoteAllocType::HPF, n_bytes}));
-    auto* dst_mem = reinterpret_cast<uint8_t*>(t.getMem({coyote::CoyoteAllocType::HPF, n_bytes}));
-    if (!src_mem || !dst_mem) {
-        std::cerr << "failed to allocate Coyote buffers\n";
-        return 1;
-    }
+    const auto timeout = std::chrono::milliseconds(timeout_ms);
+    if (role == "host-loopback") return run_host_loopback(t, beats, timeout);
+    if (role == "rx") return run_rx(t, beats, timeout);
+    if (role == "tx") return run_tx(t, beats, timeout);
 
-    std::memcpy(src_mem, payload.data(), payload.size());
-    std::memset(dst_mem, 0, payload.size());
-
-    coyote::localSg src_sg = {
-        .addr = src_mem,
-        .len = n_bytes,
-        .stream = coyote::STRM_HOST,
-        .dest = PEER_HOST_DEST,
-    };
-    coyote::localSg dst_sg = {
-        .addr = dst_mem,
-        .len = n_bytes,
-        .stream = coyote::STRM_HOST,
-        .dest = PEER_HOST_DEST,
-    };
-
-    t.clearCompleted();
-    t.setCSR(beats, REG_TX_BURST);
-    const uint64_t burst_readback = t.getCSR(REG_TX_BURST);
-    if (burst_readback != beats) {
-        std::cerr << "[FAIL] TX_BURST_BEATS CSR readback mismatch: wrote " << beats
-                  << ", read " << burst_readback << "\n"
-                  << "       This usually means the programmed bitstream does not contain the current peer-stream CSR logic.\n";
-        return 1;
-    }
-
-    t.setCSR(CTRL_TX_START | CTRL_RX_ARM, REG_CTRL);
-    const uint64_t ctrl_readback = t.getCSR(REG_CTRL);
-    if ((ctrl_readback & (CTRL_TX_START | CTRL_RX_ARM)) != (CTRL_TX_START | CTRL_RX_ARM)) {
-        std::cerr << "[FAIL] CTRL CSR readback mismatch: wrote 0x"
-                  << std::hex << (CTRL_TX_START | CTRL_RX_ARM) << ", read 0x" << ctrl_readback
-                  << std::dec << "\n";
-        return 1;
-    }
-
-    t.invoke(coyote::CoyoteOper::LOCAL_TRANSFER, src_sg, dst_sg);
-
-    if (!wait_for_completion(t, timeout)) {
-        std::cerr << "[FAIL] timed out waiting for LOCAL_TRANSFER completion\n";
-        print_status(t.getCSR(REG_STATUS));
-        return 1;
-    }
-
-    const uint64_t status = wait_for_done_status(t, timeout);
-    const uint64_t rx_beats = t.getCSR(REG_RX_BEATS);
-    const uint64_t mismatches = t.getCSR(REG_RX_MISMATCH);
-    const uint64_t tx_beats = t.getCSR(REG_TX_BEATS);
-    const uint64_t tx_running = t.getCSR(REG_TX_RUNNING);
-
-    std::cout << "[status]\n";
-    print_status(status);
-    std::cout << "[rx] beats=" << rx_beats << " mismatches=" << mismatches << "\n";
-    std::cout << "[tx] beats=" << tx_beats << " running=" << tx_running << "\n";
-
-    bool ok = true;
-    if (((status >> 1) & 1U) == 0 || ((status >> 2) & 1U) == 0) {
-        std::cerr << "[FAIL] expected rx_done and peer_link_up\n";
-        ok = false;
-    }
-    if (((status >> 0) & 1U) == 0) {
-        std::cerr << "[WARN] tx_done is low even though the peer stream transfer completed; "
-                  << "tx_count=" << tx_beats << " tx_running=" << tx_running << "\n";
-    }
-    if (rx_beats != beats) {
-        std::cerr << "[FAIL] expected " << beats << " RX beats, got " << rx_beats << "\n";
-        ok = false;
-    }
-    if (mismatches != 0) {
-        std::cerr << "[FAIL] hardware reported " << mismatches << " mismatches\n";
-        ok = false;
-    }
-    if (!std::equal(payload.begin(), payload.end(), dst_mem)) {
-        std::cerr << "[FAIL] destination buffer does not match expected counter pattern\n";
-        ok = false;
-    }
-
-    t.setCSR(0, REG_CTRL);
-
-    if (!ok) return 1;
-    std::cout << "*** PASS: peer stream loopback completed with no mismatch ***\n";
-    return 0;
+    std::cerr << "Unknown role '" << role << "'. Use rx, tx, or host-loopback.\n";
+    return 2;
 }

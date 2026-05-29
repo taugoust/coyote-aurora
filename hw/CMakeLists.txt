@@ -1,9 +1,9 @@
 ######################################################################################
 # Coyote peer-stream loopback test [Hardware]
 #
-# Exercises Coyote's optional peer ULI. For the first prototype the peer backend
-# is host_stream: host stream 0 remains visible to the app as the regular host
-# stream, while host stream 1 is hidden behind axis_peer_recv/axis_peer_send.
+# Exercises Coyote's optional peer ULI over the Aurora QSFP1 backend. The user
+# RTL sees only axis_peer_recv/axis_peer_send and peer status; Aurora-specific
+# wiring remains hidden in Coyote's PEER_BACKEND=aurora_qsfp1 implementation.
 ######################################################################################
 
 cmake_minimum_required(VERSION 3.5)
@@ -27,12 +27,12 @@ set(EN_NET_1  0)
 set(EN_RDMA   0)
 set(EN_TCP    0)
 
-# Host stream 0 remains a normal host stream. Host stream 1 backs the optional
-# peer interface through PEER_BACKEND=host_stream.
+# Keep one normal host stream for control/testing. The peer interface is backed
+# by real Aurora on U280 QSFP1; it no longer consumes a host stream.
 set(EN_STRM 1)
-set(N_STRM_AXI 2)
+set(N_STRM_AXI 1)
 set(EN_PEER 1)
-set(PEER_BACKEND "host_stream")
+set(PEER_BACKEND "aurora_qsfp1")
 set(N_PEER_LINKS 1)
 set(N_PEER_AXI 1)
 
