@@ -14,6 +14,8 @@
  *   reg[2]  TX_BURST_BEATS: number of AXI_DATA_BITS-wide beats to send
  *   reg[3]  RX_BEAT_CNT   : observed RX beat count
  *   reg[4]  RX_MISMATCHES : count of beats where expected pattern != received
+ *   reg[5]  TX_BEAT_CNT   : transmitted peer-send beat count (read-only debug)
+ *   reg[6]  TX_RUNNING    : TX FSM running flag (read-only debug)
  */
 
 // =========================================================================
@@ -47,6 +49,8 @@ function automatic logic [63:0] csr_read_value(input logic [ADDR_MSB-1:0] idx);
         1: csr_read_value = status_reg;
         3: csr_read_value = rx_beat_cnt;
         4: csr_read_value = rx_mismatches;
+        5: csr_read_value = tx_beat_idx;
+        6: csr_read_value = {63'b0, tx_running};
         default: csr_read_value = csr[idx];
     endcase
 endfunction
@@ -108,31 +112,44 @@ logic [63:0] tx_beat_idx;
 logic        tx_running;
 logic        tx_done;
 
+wire tx_fire = axis_peer_send[0].tvalid && axis_peer_send[0].tready;
+wire tx_last_beat = tx_running && (tx_burst_beats != 0) && (tx_beat_idx == tx_burst_beats - 1);
+
 always_ff @(posedge aclk) begin
     if (!aresetn) begin
         tx_beat_idx <= '0;
         tx_running  <= 1'b0;
         tx_done     <= 1'b0;
     end else begin
-        if (tx_start && !tx_running && !tx_done) begin
-            tx_running  <= 1'b1;
+        if (!tx_start) begin
             tx_beat_idx <= '0;
-        end
-        if (tx_running && axis_peer_send[0].tready) begin
-            tx_beat_idx <= tx_beat_idx + 1;
-            if (tx_beat_idx + 1 == tx_burst_beats) begin
-                tx_running <= 1'b0;
-                tx_done    <= 1'b1;
+            tx_running  <= 1'b0;
+            tx_done     <= 1'b0;
+        end else begin
+            if (!tx_running && !tx_done) begin
+                tx_beat_idx <= '0;
+                if (tx_burst_beats == 0) begin
+                    tx_done <= 1'b1;
+                end else begin
+                    tx_running <= 1'b1;
+                end
+            end else if (tx_fire) begin
+                if (tx_last_beat) begin
+                    tx_beat_idx <= tx_beat_idx + 1;
+                    tx_running  <= 1'b0;
+                    tx_done     <= 1'b1;
+                end else begin
+                    tx_beat_idx <= tx_beat_idx + 1;
+                end
             end
         end
-        if (!tx_start) tx_done <= 1'b0;  // edge-triggered restart
     end
 end
 
 assign axis_peer_send[0].tvalid = tx_running && peer_up;
 assign axis_peer_send[0].tdata  = {AXI_DATA_BITS/64{tx_beat_idx}};
 assign axis_peer_send[0].tkeep  = '1;
-assign axis_peer_send[0].tlast  = tx_running && (tx_beat_idx + 1 == tx_burst_beats);
+assign axis_peer_send[0].tlast  = tx_last_beat;
 assign axis_peer_send[0].tid    = '0;
 
 // =========================================================================

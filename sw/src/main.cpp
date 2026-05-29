@@ -44,6 +44,8 @@ constexpr uint32_t REG_STATUS      = 1;
 constexpr uint32_t REG_TX_BURST    = 2;
 constexpr uint32_t REG_RX_BEATS    = 3;
 constexpr uint32_t REG_RX_MISMATCH = 4;
+constexpr uint32_t REG_TX_BEATS    = 5;
+constexpr uint32_t REG_TX_RUNNING  = 6;
 
 constexpr uint64_t CTRL_TX_START = 1ULL << 0;
 constexpr uint64_t CTRL_RX_ARM   = 1ULL << 1;
@@ -205,10 +207,13 @@ int main(int argc, char* argv[]) {
     const uint64_t status = wait_for_done_status(t, timeout);
     const uint64_t rx_beats = t.getCSR(REG_RX_BEATS);
     const uint64_t mismatches = t.getCSR(REG_RX_MISMATCH);
+    const uint64_t tx_beats = t.getCSR(REG_TX_BEATS);
+    const uint64_t tx_running = t.getCSR(REG_TX_RUNNING);
 
     std::cout << "[status]\n";
     print_status(status);
     std::cout << "[rx] beats=" << rx_beats << " mismatches=" << mismatches << "\n";
+    std::cout << "[tx] beats=" << tx_beats << " running=" << tx_running << "\n";
 
     bool ok = true;
     if (((status >> 1) & 1U) == 0 || ((status >> 2) & 1U) == 0) {
@@ -217,7 +222,7 @@ int main(int argc, char* argv[]) {
     }
     if (((status >> 0) & 1U) == 0) {
         std::cerr << "[WARN] tx_done is low even though the peer stream transfer completed; "
-                  << "treating returned data, rx_done, and mismatch count as authoritative for this MVP\n";
+                  << "tx_count=" << tx_beats << " tx_running=" << tx_running << "\n";
     }
     if (rx_beats != beats) {
         std::cerr << "[FAIL] expected " << beats << " RX beats, got " << rx_beats << "\n";
