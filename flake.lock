@@ -886,11 +886,11 @@
         "uv2nix": "uv2nix"
       },
       "locked": {
-        "lastModified": 1779969193,
-        "narHash": "sha256-o86rVAuRrdxvYqVrDnXG2W8pDGUT8YDtalXFzODivsI=",
+        "lastModified": 1780068575,
+        "narHash": "sha256-n6yEwEcTgY1yqMa0IId1myRByhLgBevYbH5JKXBrqAs=",
         "owner": "taugoust",
         "repo": "xdb",
-        "rev": "265b4185677728c6c382c30885616bf9b924632a",
+        "rev": "a6fcc68b9b4c36ffa09188939a718be51127a786",
         "type": "github"
       },
       "original": {
