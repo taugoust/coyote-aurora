@@ -149,6 +149,11 @@
             boards = {
               u280 = {
                 inherit (doctor.boards.u280) xilinxVersion simXilinxVersion;
+                # The Aurora QSFP1 backend intentionally skips optional
+                # post-opt/place/phys-opt checkpoints to avoid Vivado 2023.2
+                # checkpoint/timing-archive crashes. Only final routed/static
+                # checkpoints are required artifacts.
+                skipIntermediateRouteCheckpoints = true;
               };
             };
           }
