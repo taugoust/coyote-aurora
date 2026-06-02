@@ -58,17 +58,18 @@
         ]
       },
       "locked": {
-        "lastModified": 1779965108,
-        "narHash": "sha256-wu4vRKJuv5n63CZC1kZ/ExMtIx7/o32jiRtUerTzO4I=",
-        "ref": "refs/heads/master",
-        "rev": "4b14feeffe5c91e4e41bc4c9a2f3cc2ecdcec529",
-        "revCount": 13,
-        "type": "git",
-        "url": "ssh://git@github.com/TUM-DSE/coyote-nix.git"
+        "lastModified": 1780396834,
+        "narHash": "sha256-4ynoAwXgZ+q0Q/seRKwYlDExm5avFshlP8IU33ZIkNM=",
+        "owner": "TUM-DSE",
+        "repo": "coyote-nix",
+        "rev": "323fbe9cf8ddeb5e9ac534c4fb41903bfa4e38a3",
+        "type": "github"
       },
       "original": {
-        "type": "git",
-        "url": "ssh://git@github.com/TUM-DSE/coyote-nix.git"
+        "owner": "TUM-DSE",
+        "ref": "refactor-deploy",
+        "repo": "coyote-nix",
+        "type": "github"
       }
     },
     "cuda-legacy": {

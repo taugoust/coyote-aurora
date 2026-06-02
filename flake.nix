@@ -8,8 +8,10 @@
       url = "github:taugoust/Coyote/peer-streams";
       flake = false;
     };
-    coyote-nix.url = "git+ssh://git@github.com/TUM-DSE/coyote-nix.git";
-    coyote-nix.inputs.nixpkgs.follows = "nixpkgs";
+    coyote-nix = {
+      url = "github:TUM-DSE/coyote-nix/refactor-deploy";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     doctor-cluster-xilinx.url = "git+ssh://git@github.com/TUM-DSE/doctor-cluster-xilinx.git";
     xdb.url = "github:taugoust/xdb";
   };
