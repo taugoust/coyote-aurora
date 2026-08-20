@@ -9,7 +9,9 @@
       flake = false;
     };
     coyote-nix = {
-      url = "github:TUM-DSE/coyote-nix/refactor-deploy";
+      url = "github:TUM-DSE/coyote-nix/master";
+      inputs.coyote.follows = "coyote";
+      inputs.flake-utils.follows = "flake-utils";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     doctor-cluster-xilinx.url = "git+ssh://git@github.com/TUM-DSE/doctor-cluster-xilinx.git";

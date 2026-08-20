@@ -52,22 +52,27 @@
     },
     "coyote-nix": {
       "inputs": {
-        "flake-utils": "flake-utils",
+        "coyote": [
+          "coyote"
+        ],
+        "flake-utils": [
+          "flake-utils"
+        ],
         "nixpkgs": [
           "nixpkgs"
         ]
       },
       "locked": {
-        "lastModified": 1780396834,
-        "narHash": "sha256-4ynoAwXgZ+q0Q/seRKwYlDExm5avFshlP8IU33ZIkNM=",
+        "lastModified": 1787224499,
+        "narHash": "sha256-r4biTvStw548BdVQ21iUpUyH/PwYcjzjui/rNb4XbVE=",
         "owner": "TUM-DSE",
         "repo": "coyote-nix",
-        "rev": "323fbe9cf8ddeb5e9ac534c4fb41903bfa4e38a3",
+        "rev": "20cba063cb31a92fabc31b81391bd9504a97d733",
         "type": "github"
       },
       "original": {
         "owner": "TUM-DSE",
-        "ref": "refactor-deploy",
+        "ref": "master",
         "repo": "coyote-nix",
         "type": "github"
       }
@@ -157,7 +162,7 @@
     "doctor-cluster-xilinx": {
       "inputs": {
         "doctor-cluster-config": "doctor-cluster-config",
-        "flake-utils": "flake-utils_2",
+        "flake-utils": "flake-utils",
         "nixpkgs": [
           "doctor-cluster-xilinx",
           "doctor-cluster-config",
@@ -279,24 +284,6 @@
     "flake-utils_3": {
       "inputs": {
         "systems": "systems_3"
-      },
-      "locked": {
-        "lastModified": 1731533236,
-        "narHash": "sha256-l0KFg5HjrsfsO/JpG+r7fRrqm12kzFHyUHqHCVpMMbI=",
-        "owner": "numtide",
-        "repo": "flake-utils",
-        "rev": "11707dc2f618dd54ca8739b309ec4fc024de578b",
-        "type": "github"
-      },
-      "original": {
-        "owner": "numtide",
-        "repo": "flake-utils",
-        "type": "github"
-      }
-    },
-    "flake-utils_4": {
-      "inputs": {
-        "systems": "systems_4"
       },
       "locked": {
         "lastModified": 1731533236,
@@ -705,7 +692,7 @@
         "coyote": "coyote",
         "coyote-nix": "coyote-nix",
         "doctor-cluster-xilinx": "doctor-cluster-xilinx",
-        "flake-utils": "flake-utils_3",
+        "flake-utils": "flake-utils_2",
         "nixpkgs": "nixpkgs_2",
         "xdb": "xdb"
       }
@@ -816,21 +803,6 @@
         "type": "github"
       }
     },
-    "systems_4": {
-      "locked": {
-        "lastModified": 1681028828,
-        "narHash": "sha256-Vy1rq5AaRuLzOxct8nz4T6wlgyUR7zLU309k9mBC768=",
-        "owner": "nix-systems",
-        "repo": "default",
-        "rev": "da67096a3b9bf56a91d16901293e51ba5b49a27e",
-        "type": "github"
-      },
-      "original": {
-        "owner": "nix-systems",
-        "repo": "default",
-        "type": "github"
-      }
-    },
     "treefmt-nix": {
       "inputs": {
         "nixpkgs": [
@@ -880,7 +852,7 @@
     },
     "xdb": {
       "inputs": {
-        "flake-utils": "flake-utils_4",
+        "flake-utils": "flake-utils_3",
         "nixpkgs": "nixpkgs_3",
         "pyproject-build-systems": "pyproject-build-systems",
         "pyproject-nix": "pyproject-nix",
