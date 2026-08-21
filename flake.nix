@@ -58,6 +58,48 @@
           ];
         };
 
+        csrRegressionSource = lib.fileset.toSource {
+          root = ./hw;
+          fileset = lib.fileset.unions [
+            ./hw/src/hdl/aurora_loopback_csrs.sv
+            ./hw/tb/aurora_loopback_csrs_tb.sv
+          ];
+        };
+
+        auroraCsrRegression =
+          pkgs.runCommand "aurora-loopback-csr-regression"
+            {
+              nativeBuildInputs = with pkgs; [
+                gnumake
+                stdenv.cc
+                verilator
+              ];
+            }
+            ''
+              cp -R ${csrRegressionSource} source
+              chmod -R u+w source
+
+              verilator \
+                --binary \
+                --timing \
+                --assert \
+                -Wall \
+                --top-module aurora_loopback_csrs_tb \
+                --Mdir obj_dir \
+                source/src/hdl/aurora_loopback_csrs.sv \
+                source/tb/aurora_loopback_csrs_tb.sv
+
+              ./obj_dir/Vaurora_loopback_csrs_tb | tee regression.log
+              grep -F \
+                "PASS: Aurora AXI-Lite CSR writes honor WSTRB and preserve adjacent registers" \
+                regression.log
+
+              mkdir -p "$out"
+              printf '%s\n' \
+                "PASS: Aurora AXI-Lite CSR writes honor WSTRB and preserve adjacent registers" \
+                > "$out/result.txt"
+            '';
+
         auroraHost = pkgs.stdenv.mkDerivation {
           pname = "aurora-loopback-host";
           version = "0.1.0";
@@ -293,6 +335,10 @@
             simSession = "aurora-ultrascale";
             simWorkspaceSuffix = "aurora-u280";
           };
+        };
+
+        checks = {
+          aurora-loopback-csr-regression = auroraCsrRegression;
         };
 
         packages = {

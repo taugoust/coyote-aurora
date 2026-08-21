@@ -124,6 +124,18 @@ static bool verify_csr_write(coyote::cThread& t, uint32_t reg, uint64_t value, c
     return true;
 }
 
+static bool verify_burst_after_control(coyote::cThread& t, uint64_t beats) {
+    const uint64_t readback = t.getCSR(REG_TX_BURST);
+    if (readback == beats) return true;
+
+    // Stop a potentially unbounded transmitter before reporting a control-path
+    // regression. CTRL and TX_BURST are independent 64-bit CSR slots.
+    t.setCSR(0, REG_CTRL);
+    std::cerr << "[FAIL] TX_BURST_BEATS changed after CTRL write: expected " << beats
+              << ", read " << readback << "\n";
+    return false;
+}
+
 static int run_host_loopback(coyote::cThread& t, uint64_t beats, std::chrono::milliseconds timeout) {
     const auto payload = make_counter_pattern(beats);
     const auto n_bytes = static_cast<uint32_t>(payload.size());
@@ -148,6 +160,7 @@ static int run_host_loopback(coyote::cThread& t, uint64_t beats, std::chrono::mi
     t.clearCompleted();
     if (!verify_csr_write(t, REG_TX_BURST, beats, "TX_BURST_BEATS")) return 1;
     if (!verify_csr_write(t, REG_CTRL, CTRL_TX_START | CTRL_RX_ARM, "CTRL")) return 1;
+    if (!verify_burst_after_control(t, beats)) return 1;
     t.invoke(coyote::CoyoteOper::LOCAL_TRANSFER, src_sg, dst_sg);
 
     if (!wait_for_completion(t, timeout)) {
@@ -185,6 +198,7 @@ static int run_rx(coyote::cThread& t, uint64_t beats, std::chrono::milliseconds 
     std::cout << "Mode:        rx\n";
     if (!verify_csr_write(t, REG_TX_BURST, beats, "TX_BURST_BEATS")) return 1;
     if (!verify_csr_write(t, REG_CTRL, CTRL_RX_ARM, "CTRL")) return 1;
+    if (!verify_burst_after_control(t, beats)) return 1;
 
     const uint64_t status = wait_for_status_bits(t, (1ULL << 1) | (1ULL << 2), timeout);
     const uint64_t rx_beats = t.getCSR(REG_RX_BEATS);
@@ -207,6 +221,7 @@ static int run_tx(coyote::cThread& t, uint64_t beats, std::chrono::milliseconds 
     std::cout << "Mode:        tx\n";
     if (!verify_csr_write(t, REG_TX_BURST, beats, "TX_BURST_BEATS")) return 1;
     if (!verify_csr_write(t, REG_CTRL, CTRL_TX_START, "CTRL")) return 1;
+    if (!verify_burst_after_control(t, beats)) return 1;
 
     const uint64_t status = wait_for_status_bits(t, (1ULL << 0) | (1ULL << 2), timeout);
     const uint64_t tx_beats = t.getCSR(REG_TX_BEATS);
