@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <thread>
 #include <unistd.h>
@@ -91,7 +92,12 @@ std::vector<uint8_t> HeliosCoyoteTransport::roundtrip(
     const auto t0 = std::chrono::steady_clock::now();
     while (thread_.checkCompleted(coyote::CoyoteOper::LOCAL_TRANSFER) != 1) {
         if (std::chrono::steady_clock::now() - t0 > timeout) {
-            throw std::runtime_error("Timed out waiting for LOCAL_TRANSFER completion");
+            std::ostringstream message;
+            message << "Timed out waiting for LOCAL_TRANSFER completion"
+                    << " (status=0x" << std::hex << thread_.getCSR(1)
+                    << std::dec << ", peer_tx_beats=" << thread_.getCSR(5)
+                    << ", peer_rx_beats=" << thread_.getCSR(3) << ")";
+            throw std::runtime_error(message.str());
         }
         std::this_thread::sleep_for(std::chrono::microseconds(50));
     }
