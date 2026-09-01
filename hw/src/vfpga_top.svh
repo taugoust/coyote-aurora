@@ -1,40 +1,28 @@
 /**
- * Coyote peer-stream loopback test.
+ * Clara-side host/Aurora bridge for QShell peer-path validation.
  *
- * User logic for exercising the optional Coyote peer abstraction. With the
- * prototype host_stream backend, host stream 1 is hidden by Coyote and exposed
- * here as:
- *   - axis_peer_recv[0] : fake peer -> vFPGA
- *   - axis_peer_send[0] : vFPGA -> fake peer
- *   - peer_link_up[0], peer_lane_up[3:0] : backend status
+ *   axis_host_recv[0] -> registered queue -> axis_peer_send[0]
+ *   axis_peer_recv[0] -> registered queue -> axis_host_send[0]
  *
- * Host control flow (via axi_ctrl, 64-bit register slots):
- *   reg[0]  CTRL          : bit0=TX start, bit1=RX arm
- *   reg[1]  STATUS        : bit0=tx_done, bit1=rx_done, bit2=peer_link_up, bits[6:3]=peer_lane_up
- *   reg[2]  TX_BURST_BEATS: number of AXI_DATA_BITS-wide beats to send
- *   reg[3]  RX_BEAT_CNT   : observed RX beat count
- *   reg[4]  RX_MISMATCHES : count of beats where expected pattern != received
- *   reg[5]  TX_BEAT_CNT   : transmitted peer-send beat count (read-only debug)
- *   reg[6]  TX_RUNNING    : TX FSM running flag (read-only debug)
+ * The queues preserve data, keep, and record boundaries while preventing a
+ * combinational ready path between PCIe host streams and the Aurora backend.
+ * This initial bridge accepts complete one-beat records only. Link loss drops
+ * queued host requests but never retracts a complete response already offered
+ * to the host. The QSH2 d3 workload uses one beat per record.
  */
 
-// =========================================================================
-// Control / status registers parsed off axi_ctrl
-// =========================================================================
 logic [63:0] ctrl_reg;
 logic [63:0] tx_burst_beats;
-logic [63:0] tx_beat_idx;
-logic [63:0] rx_beat_cnt;
+logic [63:0] peer_tx_beat_count;
+logic [63:0] peer_rx_beat_count;
 logic [63:0] rx_mismatches;
-logic        tx_running;
-logic        tx_done;
-logic        rx_done;
+logic        peer_tx_active;
 
-wire tx_start = ctrl_reg[0];
-wire rx_arm = ctrl_reg[1];
 wire peer_up = peer_link_up[0];
 wire [3:0] peer_lanes = peer_lane_up[3:0];
-wire [63:0] status_reg = {57'b0, peer_lanes, peer_up, rx_done, tx_done};
+wire [63:0] status_reg = {57'b0, peer_lanes, peer_up, 2'b00};
+wire peer_tx_fire = axis_peer_send[0].tvalid && axis_peer_send[0].tready;
+wire peer_rx_fire = axis_peer_recv[0].tvalid && axis_peer_recv[0].tready;
 
 aurora_loopback_csrs inst_csrs (
     .aclk(aclk),
@@ -59,80 +47,55 @@ aurora_loopback_csrs inst_csrs (
     .ctrl(ctrl_reg),
     .tx_burst_beats(tx_burst_beats),
     .status(status_reg),
-    .rx_beat_count(rx_beat_cnt),
+    .rx_beat_count(peer_rx_beat_count),
     .rx_mismatch_count(rx_mismatches),
-    .tx_beat_count(tx_beat_idx),
-    .tx_running(tx_running)
+    .tx_beat_count(peer_tx_beat_count),
+    .tx_running(peer_tx_active)
 );
 
-// =========================================================================
-// TX path: send `tx_burst_beats` counter-pattern beats over peer_send[0]
-// =========================================================================
-wire tx_fire = axis_peer_send[0].tvalid && axis_peer_send[0].tready;
-wire tx_last_beat = tx_running && (tx_burst_beats != 0) && (tx_beat_idx == tx_burst_beats - 1);
+aurora_host_peer_bridge #(.DATA_W(AXI_DATA_BITS)) inst_host_peer_bridge (
+    .aclk(aclk),
+    .aresetn(aresetn[0]),
+    .link_up(peer_up),
+    .s_host_tdata(axis_host_recv[0].tdata),
+    .s_host_tkeep(axis_host_recv[0].tkeep),
+    .s_host_tlast(axis_host_recv[0].tlast),
+    .s_host_tvalid(axis_host_recv[0].tvalid),
+    .s_host_tready(axis_host_recv[0].tready),
+    .m_host_tdata(axis_host_send[0].tdata),
+    .m_host_tkeep(axis_host_send[0].tkeep),
+    .m_host_tlast(axis_host_send[0].tlast),
+    .m_host_tvalid(axis_host_send[0].tvalid),
+    .m_host_tready(axis_host_send[0].tready),
+    .s_peer_tdata(axis_peer_recv[0].tdata),
+    .s_peer_tkeep(axis_peer_recv[0].tkeep),
+    .s_peer_tlast(axis_peer_recv[0].tlast),
+    .s_peer_tvalid(axis_peer_recv[0].tvalid),
+    .s_peer_tready(axis_peer_recv[0].tready),
+    .m_peer_tdata(axis_peer_send[0].tdata),
+    .m_peer_tkeep(axis_peer_send[0].tkeep),
+    .m_peer_tlast(axis_peer_send[0].tlast),
+    .m_peer_tvalid(axis_peer_send[0].tvalid),
+    .m_peer_tready(axis_peer_send[0].tready)
+);
+
+assign axis_peer_send[0].tid = '0;
+assign axis_host_send[0].tid = '0;
+assign peer_tx_active = axis_peer_send[0].tvalid;
 
 always_ff @(posedge aclk) begin
-    if (!aresetn) begin
-        tx_beat_idx <= '0;
-        tx_running  <= 1'b0;
-        tx_done     <= 1'b0;
-    end else begin
-        if (!tx_start) begin
-            tx_beat_idx <= '0;
-            tx_running  <= 1'b0;
-            tx_done     <= 1'b0;
-        end else begin
-            if (!tx_running && !tx_done) begin
-                tx_beat_idx <= '0;
-                if (tx_burst_beats == 0) begin
-                    tx_done <= 1'b1;
-                end else begin
-                    tx_running <= 1'b1;
-                end
-            end else if (tx_fire) begin
-                if (tx_last_beat) begin
-                    tx_beat_idx <= tx_beat_idx + 1;
-                    tx_running  <= 1'b0;
-                    tx_done     <= 1'b1;
-                end else begin
-                    tx_beat_idx <= tx_beat_idx + 1;
-                end
-            end
-        end
-    end
-end
-
-assign axis_peer_send[0].tvalid = tx_running && peer_up;
-assign axis_peer_send[0].tdata  = {AXI_DATA_BITS/64{tx_beat_idx}};
-assign axis_peer_send[0].tkeep  = '1;
-assign axis_peer_send[0].tlast  = tx_last_beat;
-assign axis_peer_send[0].tid    = '0;
-
-// =========================================================================
-// RX path: count beats from peer_recv[0], check pattern, count mismatches
-// =========================================================================
-always_ff @(posedge aclk) begin
-    if (!aresetn || !rx_arm) begin
-        rx_beat_cnt   <= '0;
+    if (!aresetn[0]) begin
+        peer_tx_beat_count <= '0;
+        peer_rx_beat_count <= '0;
         rx_mismatches <= '0;
-        rx_done       <= 1'b0;
-    end else if (axis_peer_recv[0].tvalid && axis_peer_recv[0].tready) begin
-        rx_beat_cnt <= rx_beat_cnt + 1;
-        // Each beat should repeat the expected 64-bit beat index across tdata.
-        if (axis_peer_recv[0].tdata != {AXI_DATA_BITS/64{rx_beat_cnt}}) begin
-            rx_mismatches <= rx_mismatches + 1;
-        end
-        if (axis_peer_recv[0].tlast) rx_done <= 1'b1;
+    end else begin
+        if (peer_tx_fire)
+            peer_tx_beat_count <= peer_tx_beat_count + 1'b1;
+        if (peer_rx_fire)
+            peer_rx_beat_count <= peer_rx_beat_count + 1'b1;
     end
 end
 
-assign axis_peer_recv[0].tready = rx_arm;
-
-// =========================================================================
-// Tie off all the Coyote interfaces we don't use
-// =========================================================================
-always_comb axis_host_recv[0].tie_off_s();
-always_comb axis_host_send[0].tie_off_m();
 always_comb notify.tie_off_m();
 always_comb sq_rd.tie_off_m();
 always_comb sq_wr.tie_off_m();

@@ -15,8 +15,8 @@ endif()
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} ${CYT_DIR}/cmake)
 find_package(CoyoteHW REQUIRED)
 
-project(peer_stream_loopback)
-message("*** Coyote peer-stream loopback [Hardware] ***")
+project(qshell_peer_bridge)
+message("*** Coyote Aurora QShell peer bridge [Hardware] ***")
 
 set(N_REGIONS 1)
 

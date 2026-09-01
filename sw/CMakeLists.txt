@@ -23,13 +23,30 @@ else()
     add_subdirectory(${CYT_DIR}/sw ${CMAKE_BINARY_DIR}/coyote)
 endif()
 
-message("*** Coyote peer-stream loopback [Software] ***")
+message("*** Aurora QShell peer bridge [Software] ***")
 
 set(TARGET_DIR "${CMAKE_SOURCE_DIR}/src")
-
-set(EXEC test)
-add_executable(${EXEC} ${TARGET_DIR}/main.cpp)
-target_link_libraries(${EXEC} PUBLIC Coyote)
+set(PROTOCOL_SOURCES
+    ${TARGET_DIR}/helios_protocol.cpp
+    ${TARGET_DIR}/helios_qshell_protocol.cpp
+)
 
 find_package(Boost CONFIG REQUIRED COMPONENTS program_options)
-target_link_libraries(${EXEC} PUBLIC Boost::program_options)
+
+add_executable(aurora-qshell-peer
+    ${TARGET_DIR}/qshell_peer_main.cpp
+    ${TARGET_DIR}/helios_transport_coyote.cpp
+    ${PROTOCOL_SOURCES}
+)
+target_include_directories(aurora-qshell-peer PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(aurora-qshell-peer PUBLIC Coyote Boost::program_options)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(aurora-qshell-protocol-test
+        tests/helios_protocol_test.cpp
+        ${PROTOCOL_SOURCES}
+    )
+    target_include_directories(aurora-qshell-protocol-test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+    add_test(NAME aurora-qshell-protocol COMMAND aurora-qshell-protocol-test)
+endif()

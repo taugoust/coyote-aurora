@@ -1,138 +1,101 @@
-# Coyote Example 14: Aurora 64B/66B FPGA-to-FPGA Loopback
+# Aurora QShell peer bridge
 
-Direct serial communication between two U280 Alveo cards (rose ↔ clara) via
-Xilinx Aurora 64B/66B IP on QSFP1, bypassing Ethernet/IP entirely.
-
-## Configuration
-
-- **Aurora IP:** 4 lanes bonded @ 25.78125 Gbps = **103.125 Gbps gross** (~99.6 Gbps after 64B/66B encoding)
-- **Reference clock:** 161.1328125 MHz from QSFP1 cage
-- **User interface:** 256-bit AXI4-Stream (TX + RX), `aclk` domain
-- **Topology:** rose:QSFP1 ⇄ QSFP28 DAC/AOC cable ⇄ clara:QSFP1
+This repository provides the Clara-side endpoint for an end-to-end QShell peer-path test over the existing Rose ↔ Clara QSFP1 cable.
 
 ## Architecture
 
-```
-Host x86 (rose)                                          Host x86 (clara)
-   |                                                          |
-   | PCIe (Coyote control regs)                               | PCIe (Coyote control regs)
-   v                                                          v
-+--vFPGA region--+                                  +--vFPGA region--+
-| counter gen    |                                  | beat checker   |
-| TX FSM         |                                  | RX FSM         |
-+----------------+                                  +----------------+
-   | axis_aurora_tx (256-bit)                          ^ axis_aurora_rx (256-bit)
-   v                                                  |
-+--Coyote shell---+                                +--Coyote shell---+
-| aurora_module   |                                | aurora_module   |
-| (Aurora IP)     |                                | (Aurora IP)     |
-+-----------------+                                +-----------------+
-   |  4 × GTY @ 25.78 Gbps                            ^
-   v  (qsfp1)                                         |
-   +----- QSFP28 cable -------------------------------+
+```text
+Clara host
+  │ Coyote H2C/C2H
+  ▼
+host/Aurora bridge vFPGA
+  │ Aurora 64B/66B, QSFP1
+  ▼
+Rose QShell peer ingress → Helios d3 → QShell peer egress
+  │
+  └──────────────── Aurora correction response ───────────────► Clara host
 ```
 
-## Build
+Rose keeps its accepted aggregate QShell/Helios image unchanged. That deployed image is Helios commit `ed250d5048f43b98ac2969666f16aaea4980982c`, QShell commit `c4179da5303db1007a6c5ecdc69b8e51c70b1f14`, and bitstream SHA-256 `552286a9828e75aac7cda1f98ea59b4e77df034c04c7d0440d4b4cdb792de7fd`. Clara runs a Coyote image with a transparent bidirectional bridge:
 
-### Hardware
+- host receive → two-entry registered queue → Aurora transmit;
+- Aurora receive → two-entry registered queue → host transmit.
+
+The queues preserve `tdata`, `tkeep`, and `tlast`, isolate downstream ready paths, and sustain one beat per cycle without stalls. This initial bridge accepts only complete one-beat records, matching Helios d3. A request queued toward a failed link is discarded; a complete correction already accepted from Aurora remains a valid host transfer and is never retracted under host backpressure.
+
+The Coyote input is pinned to Rose's exact revision `6b9b0ae2b2928d9d0c9afce4313fcec3f128b705`. This matches the four-lane 25.78125 Gb/s Aurora framing, 512-bit shell CDC, QSFP1 constraints, and Immediate NFC configuration used by the deployed Rose image.
+
+## Device-free validation
 
 ```bash
-# From inside versal-shell on rose (or wherever Vivado 2025.1 with U280 part lives)
-cd /scratch/anubhav/Coyote-upstream/examples/14_aurora_loopback/hw
-mkdir -p build && cd build
-cmake ../ -DFDEV_NAME=u280
-make project   # ~30 min (Aurora IP generation + BD assembly)
-make bitgen    # ~2–4 hours (synth + impl + bitstream)
+nix build -L .#checks.x86_64-linux.aurora-peer-bridge-stream-regression
+nix build -L .#checks.x86_64-linux.aurora-loopback-csr-regression
+nix build -L .#aurora-qshell-peer-host
+nix flake check --no-build
 ```
 
-Produces `build/bitstreams/cyt_top.bit`. Copy or build the same on clara.
+## Build the Clara image
 
-### Software
+Run the physical build on Rose or another configured build host:
 
 ```bash
-cd /scratch/anubhav/Coyote-upstream/examples/14_aurora_loopback/sw
-mkdir -p build && cd build
-cmake ../
-make
+nix build -L .#aurora-qshell-peer-bridge-u280 \
+  -o result-qshell-peer-bridge-u280 --keep-failed
 ```
 
-Produces `build/test`.
+A successful Nix command is not sufficient acceptance. Before deployment, inspect the package's canonical timing, routing, DRC, and bitstream reports and require non-negative setup and hold slack, complete routing, and no error-level bitstream DRC findings.
 
-## Run
+## Copy to Clara
 
-### Step 1: Program both cards
+Copy the realized image and host-runner closures; Clara does not rebuild them:
 
 ```bash
-# On rose:
-cd /scratch/anubhav/Coyote-upstream
-./program_fpga.sh examples/14_aurora_loopback/hw/build/bitstreams/cyt_top
-
-# On clara: same.
+image_out="$(nix path-info .#aurora-qshell-peer-bridge-u280)"
+host_out="$(nix path-info .#aurora-qshell-peer-host)"
+driver_out="$(nix path-info .#coyote-driver-ultrascale_plus-clara)"
+tools_out="$(nix path-info .#aurora-qshell-peer-clara-deployment-tools)"
+nix copy --to ssh://clara "$image_out" "$host_out" "$driver_out" "$tools_out"
 ```
 
-### Step 2: Connect physical cable
+Retain those exact paths on Clara before deployment, for example with `nix-store --add-root <durable-link> --realise <store-path>`. The driver package uses Clara's pinned Linux 7.1.9 kernel/compiler set; the copied deployment tools contain the generic multifunction-endpoint reset repair.
 
-Plug a QSFP28 DAC or AOC cable between rose's QSFP1 cage and clara's QSFP1 cage.
-Both cards must be programmed before the cable is plugged in (or unplug + replug
-after both are programmed to re-trigger Aurora's init handshake).
+## Program Clara
 
-### Step 3: Run host apps
-
-On **clara** (RX, arm first to be ready when rose starts sending):
+On Clara, use BDF `0000:e1:00.0` and JTAG cable `21770327N021A`. The copied tools support the canonical manual deployment sequence without evaluating or rebuilding a flake on Clara:
 
 ```bash
-sudo ./test --role rx --beats 1024
+export PATH=/nix/store/<tools-output>/bin:$PATH
+export FDEV_NAME=u280
+export FPGA_BDF=0000:e1:00.0
+export FPGA_PART_HINT=xcu280
+export FPGA_JTAG_TARGET=21770327N021A
+image=/nix/store/<bridge-output>/bitstreams/cyt_top.bit
+driver=/nix/store/<driver-output>/coyote_driver.ko
+
+unload-driver
+hot-reset
+program-cli "$image"
+hot-reset
+set-hugepages
+insert-driver "$driver" "$image"
 ```
 
-On **rose** (TX, fires after RX is armed):
+Do not run this sequence on Rose; Rose must retain the accepted QShell/Helios image.
+
+## Run a peer decode
+
+On Clara:
 
 ```bash
-sudo ./test --role tx --beats 1024
+/nix/store/<host-output>/bin/aurora-qshell-peer --qshell \
+  --distance 3 --noise-model phenom \
+  --context 4660 --round 1 --route 1 \
+  --source-endpoint 305419896 --peer-endpoint 2147483649 \
+  --decoder-endpoint 0 --route-version 0 \
+  --input-hex 00000000 --expect-correction-hex 000000000000 \
+  --device 0 --timeout-ms 2000 --verbose
 ```
 
-Expected output on clara:
+The runner first requires Aurora link-up, reports the active lane mask, transfers the QSH2 record through Coyote, and validates the returned correction's ABI, class, schema, exact d3 payload length, context, round, route capability, endpoint identities, route version, and optional correction oracle. Set `--device` to Clara's actual Coyote device index if it is not zero.
 
-```
-=== Coyote Example 14: Aurora Loopback ===
-Role:  rx
-Beats: 1024
-[OK] channel_up asserted;   channel_up=1 lane_up=1111 tx_done=0 rx_done=0
-Arming RX...
-  beats received: 1024/1024
-[RX result] beats=1024 mismatches=0
-*** PASS: 1024 beats received with no mismatch ***
-```
-
-## What this validates
-
-| Component | Validated by |
-|---|---|
-| Aurora IP synth on U280 GTY | `make bitgen` succeeds |
-| QSFP1 MGT refclock @ 161.13 MHz pinning | `channel_up=1` asserts |
-| 4-lane bond, no lane drops | `lane_up=4'b1111` |
-| AXI4-Stream CDC (user_clk ↔ aclk) | RX beats arrive intact |
-| Shell-to-vFPGA Aurora wiring | counter pattern matches on RX |
-
-## Troubleshooting
-
-- **`channel_up=0`, `lane_up=0000`**: cable not plugged, peer not programmed, or refclock pin mismatch.
-  Check `report_clocks` and the actual MGT refclock frequency in Vivado.
-- **`channel_up=1`, `lane_up=1111`, but `beats=0`**: TX side didn't fire — check rose's CTRL register.
-- **`mismatches > 0`**: bit errors. Check cable quality; lower line rate to 10.3125 Gbps for sanity.
-- **PMA_INIT loops forever**: GT reference clock not stable. Check QSFP1 module is inserted (some
-  QSFP cages need a module present to enable the refclock).
-
-## Files
-
-- `hw/CMakeLists.txt` — example build config (`EN_AURORA_1=1`, no CMAC)
-- `hw/src/vfpga_top.svh` — vFPGA logic (counter gen + beat checker + CSR slave)
-- `sw/src/main.cpp` — host driver (rx/tx role split)
-
-Shell-side support (one-time per Coyote tree, not per-example):
-- `scripts/ip_inst/aurora_infrastructure.tcl` — generates `aurora_loopback_ip` + two `axis_data_fifo_aurora_*` at shell build time when `EN_AURORA_1=1`
-- `hw/templates/common/shell_top_tmplt.txt` — Aurora module instantiation on QSFP1
-- `hw/templates/common/dynamic_top_tmplt.txt` — Aurora AXIS through dynamic region
-- `hw/templates/common/user_wrapper_tmplt.txt` — flatten/repack at vFPGA boundary
-- `hw/templates/common/user_logic_tmplt.txt` — vFPGA port declaration
-- `hw/hdl/aurora/aurora_module.sv` — Aurora IP wrapper + init FSM + CDC FIFOs
-- `hw/constraints/u280/dynamic/impl/u280_shell_zaurora_1.xdc` — 161 MHz refclock pin override
+Rose binds physical peer endpoint `0x80000001` (`2147483649`) at ingress. The deliberately different wire source `0x12345678` proves that Rose replaced the untrusted field: the returned correction must target the authenticated peer endpoint. The currently deployed reset/default route reports decoder endpoint/version `0/0`.

@@ -1,11 +1,13 @@
 {
-  description = "Coyote Aurora 64B/66B loopback example";
+  description = "Coyote Aurora bridge for QShell peer-path validation";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     flake-utils.url = "github:numtide/flake-utils";
     coyote = {
-      url = "github:taugoust/Coyote/peer-streams";
+      # Match the deployed Rose image's Aurora framing, 512-bit CDC, and
+      # Immediate NFC configuration exactly.
+      url = "github:taugoust/Coyote/6b9b0ae2b2928d9d0c9afce4313fcec3f128b705";
       flake = false;
     };
     coyote-nix = {
@@ -14,7 +16,22 @@
       inputs.flake-utils.follows = "flake-utils";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    doctor-cluster-xilinx.url = "git+ssh://git@github.com/TUM-DSE/doctor-cluster-xilinx.git";
+    deployment-coyote = {
+      url = "git+ssh://git@github.com/taugoust/Coyote.git?ref=linux-7-driver-compat&rev=0e4e5ae66f42f53436d9b31f56d0704ccab9dbfb";
+      flake = false;
+    };
+    deployment-coyote-nix = {
+      url = "git+ssh://git@github.com/TUM-DSE/coyote-nix.git?ref=multifunction-endpoint-reset&rev=61e60fd8517c52dfcbcba1a01d34b73101eeb234";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    doctor-cluster-xilinx = {
+      url = "git+ssh://git@github.com/TUM-DSE/doctor-cluster-xilinx.git?rev=ce34aac85ebed773484dc62d5fe1531ac45150d2";
+      inputs.doctor-cluster-config.url = "git+ssh://git@github.com/TUM-DSE/doctor-cluster-config.git?rev=1ba4cd371f4f20ef0824775e104da288514397e5";
+    };
+    rose-helios = {
+      url = "git+ssh://git@github.com/TUM-DSE/helios-coyote.git?ref=qshell-migration&rev=a8909a44e408490f5f8d7dffdc5176edf590a06d";
+      flake = false;
+    };
     xdb.url = "github:taugoust/xdb";
   };
 
@@ -40,7 +57,11 @@
         lib = pkgs.lib;
         isX86_64 = pkgs.stdenv.hostPlatform.isx86_64;
         coyoteRoot = coyote;
+        deploymentCoyoteRoot = inputs.deployment-coyote;
+        deploymentCoyoteNix = inputs.deployment-coyote-nix;
         doctor = doctorClusterXilinx.lib.mkXilinxContext { inherit pkgs system; };
+        driverPkgs =
+          doctorClusterXilinx.inputs.doctor-cluster-config.inputs.nixpkgs.legacyPackages.${system};
         xilinxShareRoot = doctor.xilinxShareRoot;
         driverKernels = doctor.driverKernels;
 
@@ -48,7 +69,12 @@
           inherit pkgs coyoteRoot xilinxShareRoot;
           platforms = linuxSystems;
         };
-        mkApp = coyoteNix.lib.mkApp;
+        deploymentTools = deploymentCoyoteNix.lib.mkTools {
+          inherit pkgs xilinxShareRoot;
+          coyoteRoot = deploymentCoyoteRoot;
+          platforms = linuxSystems;
+        };
+        mkApp = deploymentCoyoteNix.lib.mkApp;
 
         hwSource = lib.fileset.toSource {
           root = ./hw;
@@ -66,11 +92,22 @@
           ];
         };
 
+        bridgeRegressionSource = lib.fileset.toSource {
+          root = ./hw;
+          fileset = lib.fileset.unions [
+            ./hw/src/hdl/axis_stream_fifo_2.sv
+            ./hw/src/hdl/aurora_host_peer_bridge.sv
+            ./hw/tb/axis_stream_fifo_2_tb.sv
+            ./hw/tb/aurora_host_peer_bridge_tb.sv
+          ];
+        };
+
         auroraCsrRegression =
           pkgs.runCommand "aurora-loopback-csr-regression"
             {
               nativeBuildInputs = with pkgs; [
                 gnumake
+                python3
                 stdenv.cc
                 verilator
               ];
@@ -100,8 +137,73 @@
                 > "$out/result.txt"
             '';
 
-        auroraHost = pkgs.stdenv.mkDerivation {
-          pname = "aurora-loopback-host";
+        auroraBridgeRegression =
+          pkgs.runCommand "aurora-peer-bridge-stream-regression"
+            {
+              nativeBuildInputs = with pkgs; [
+                gnumake
+                python3
+                stdenv.cc
+                verilator
+              ];
+            }
+            ''
+              cp -R ${bridgeRegressionSource} source
+              chmod -R u+w source
+
+              verilator \
+                --binary \
+                --timing \
+                --assert \
+                -Wall \
+                -Wno-fatal \
+                --top-module axis_stream_fifo_2_tb \
+                --Mdir obj_dir \
+                source/src/hdl/axis_stream_fifo_2.sv \
+                source/tb/axis_stream_fifo_2_tb.sv
+
+              ./obj_dir/Vaxis_stream_fifo_2_tb | tee regression.log
+              grep -F \
+                "PASS: registered two-entry stream queue preserves records, stalls, throughput, and flush" \
+                regression.log
+
+              verilator \
+                --binary \
+                --timing \
+                --assert \
+                -Wall \
+                -Wno-fatal \
+                --top-module aurora_host_peer_bridge_tb \
+                --Mdir bridge_obj_dir \
+                source/src/hdl/axis_stream_fifo_2.sv \
+                source/src/hdl/aurora_host_peer_bridge.sv \
+                source/tb/aurora_host_peer_bridge_tb.sv
+
+              ./bridge_obj_dir/Vaurora_host_peer_bridge_tb | tee -a regression.log
+              grep -F \
+                "PASS: Aurora host/peer bridge preserves both directions, backpressure, and link epochs" \
+                regression.log
+
+              mkdir -p "$out"
+              cp regression.log "$out/"
+            '';
+
+        roseProtocolContract = pkgs.runCommand "aurora-rose-qsh2-protocol-contract" { } ''
+          diff -u ${inputs.rose-helios}/sw/include/helios/helios_protocol.h \
+            ${./sw/include/helios/helios_protocol.h}
+          diff -u ${inputs.rose-helios}/sw/include/helios/helios_qshell_protocol.h \
+            ${./sw/include/helios/helios_qshell_protocol.h}
+          diff -u ${inputs.rose-helios}/sw/src/helios_protocol.cpp \
+            ${./sw/src/helios_protocol.cpp}
+          diff -u ${inputs.rose-helios}/sw/src/helios_qshell_protocol.cpp \
+            ${./sw/src/helios_qshell_protocol.cpp}
+          grep -F 'qshellRevision = "c4179da5303db1007a6c5ecdc69b8e51c70b1f14";' \
+            ${inputs.rose-helios}/flake.nix >/dev/null
+          touch "$out"
+        '';
+
+        auroraPeerHost = pkgs.stdenv.mkDerivation {
+          pname = "aurora-qshell-peer-host";
           version = "0.1.0";
           src = ./sw;
 
@@ -124,9 +226,9 @@
             runHook preInstall
 
             mkdir -p $out/bin $out/lib $out/libexec
-            install -m755 test $out/libexec/aurora-loopback
+            install -m755 aurora-qshell-peer $out/libexec/aurora-qshell-peer
 
-            cat > $out/bin/aurora-loopback <<EOF
+            cat > $out/bin/aurora-qshell-peer <<EOF
             #!${pkgs.runtimeShell}
             set -euo pipefail
 
@@ -140,9 +242,9 @@
               fi
             done
             umask 000
-            exec $out/libexec/aurora-loopback "\$@"
+            exec $out/libexec/aurora-qshell-peer "\$@"
             EOF
-            chmod +x $out/bin/aurora-loopback
+            chmod +x $out/bin/aurora-qshell-peer
 
             copied=0
             while IFS= read -r -d $'\0' lib; do
@@ -161,7 +263,7 @@
                 pkgs.stdenv.cc.cc
               ]
             }"
-            patchelf --set-rpath "$lib_path" $out/libexec/aurora-loopback
+            patchelf --set-rpath "$lib_path" $out/libexec/aurora-qshell-peer
 
             for so in $out/lib/*.so*; do
               [ -e "$so" ] || continue
@@ -173,9 +275,16 @@
             runHook postInstall
           '';
 
+          doCheck = true;
+          checkPhase = ''
+            runHook preCheck
+            ctest --output-on-failure
+            runHook postCheck
+          '';
+
           meta = {
-            description = "Host control app for the Coyote Aurora loopback example";
-            mainProgram = "aurora-loopback";
+            description = "QSH2 syndrome/correction runner for the Coyote Aurora peer bridge";
+            mainProgram = "aurora-qshell-peer";
             platforms = linuxSystems;
           };
         };
@@ -190,8 +299,8 @@
               xilinxShareRoot
               ;
             xilinxShell = doctor.xilinxShell;
-            pnamePrefix = "aurora-loopback";
-            projectName = "peer_stream_loopback";
+            pnamePrefix = "aurora-qshell-peer-bridge";
+            projectName = "qshell_peer_bridge";
             boards = {
               u280 = {
                 inherit (doctor.boards.u280) xilinxVersion simXilinxVersion;
@@ -206,13 +315,26 @@
         );
 
         coyoteDriverPackages = lib.optionalAttrs isX86_64 (
-          coyoteNix.lib.mkCoyoteDriverPackages {
-            inherit pkgs coyoteRoot driverKernels;
+          deploymentCoyoteNix.lib.mkCoyoteDriverPackages {
+            pkgs = driverPkgs;
+            inherit driverKernels;
+            coyoteRoot = deploymentCoyoteRoot;
             inherit (doctor) targetPlatforms;
           }
         );
 
         packagePath = packageName: path: "${auroraHwPackages.${packageName}}/${path}";
+
+        claraDeploymentTools = pkgs.symlinkJoin {
+          name = "aurora-qshell-peer-clara-deployment-tools";
+          paths = [
+            deploymentTools.hot-reset
+            deploymentTools.insert-driver
+            deploymentTools.program-cli
+            deploymentTools.set-hugepages
+            deploymentTools.unload-driver
+          ];
+        };
 
         xdbPackage = xdb.packages.${system}.default;
         mkXdbWrapper =
@@ -271,15 +393,12 @@
             simPackageRuntime,
             simSession,
             simWorkspaceSuffix ? board.board,
-            simProjectName ? "peer_stream_loopback.xpr",
+            simProjectName ? "qshell_peer_bridge.xpr",
           }:
-          coyoteNix.lib.mkCoyoteDevShell {
-            inherit
-              pkgs
-              tools
-              coyoteRoot
-              board
-              ;
+          deploymentCoyoteNix.lib.mkCoyoteDevShell {
+            inherit pkgs board;
+            tools = deploymentTools;
+            coyoteRoot = deploymentCoyoteRoot;
             withXilinx = true;
             fpgaPackage = fpgaPackage;
             fpgaArtifact = fpgaArtifact;
@@ -299,17 +418,19 @@
       in
       {
         devShells = {
-          default = coyoteNix.lib.mkCoyoteDevShell {
-            inherit pkgs tools coyoteRoot;
+          default = deploymentCoyoteNix.lib.mkCoyoteDevShell {
+            inherit pkgs;
+            tools = deploymentTools;
+            coyoteRoot = deploymentCoyoteRoot;
             packages = [
-              tools.checkXilinxEnv
-              tools.program-cli
-              tools.deploy-hw
-              tools.unload-driver
-              tools.hot-reset
-              tools.insert-driver
-              tools.set-hugepages
-              tools.gen-verible-filelist
+              deploymentTools.checkXilinxEnv
+              deploymentTools.program-cli
+              deploymentTools.deploy-hw
+              deploymentTools.unload-driver
+              deploymentTools.hot-reset
+              deploymentTools.insert-driver
+              deploymentTools.set-hugepages
+              deploymentTools.gen-verible-filelist
               xdbPackage
             ];
             shellHook = compileCommandsHook;
@@ -318,20 +439,20 @@
         // lib.optionalAttrs isX86_64 {
           ultrascale = mkXilinxDevShell {
             board = doctor.boards.u280;
-            fpgaPackage = "aurora-loopback-u280";
+            fpgaPackage = "aurora-qshell-peer-bridge-u280";
             fpgaArtifact = "cyt_top.bit";
-            simPackageProject = packagePath "aurora-loopback-u280-sim" "project/sim/peer_stream_loopback.xpr";
-            simPackageRuntime = packagePath "aurora-loopback-u280-sim" "project/sim";
+            simPackageProject = packagePath "aurora-qshell-peer-bridge-u280-sim" "project/sim/qshell_peer_bridge.xpr";
+            simPackageRuntime = packagePath "aurora-qshell-peer-bridge-u280-sim" "project/sim";
             simSession = "aurora-ultrascale";
             simWorkspaceSuffix = "aurora-u280";
           };
 
           xilinx = mkXilinxDevShell {
             board = doctor.boards.u280;
-            fpgaPackage = "aurora-loopback-u280";
+            fpgaPackage = "aurora-qshell-peer-bridge-u280";
             fpgaArtifact = "cyt_top.bit";
-            simPackageProject = packagePath "aurora-loopback-u280-sim" "project/sim/peer_stream_loopback.xpr";
-            simPackageRuntime = packagePath "aurora-loopback-u280-sim" "project/sim";
+            simPackageProject = packagePath "aurora-qshell-peer-bridge-u280-sim" "project/sim/qshell_peer_bridge.xpr";
+            simPackageRuntime = packagePath "aurora-qshell-peer-bridge-u280-sim" "project/sim";
             simSession = "aurora-ultrascale";
             simWorkspaceSuffix = "aurora-u280";
           };
@@ -339,10 +460,13 @@
 
         checks = {
           aurora-loopback-csr-regression = auroraCsrRegression;
+          aurora-peer-bridge-stream-regression = auroraBridgeRegression;
+          aurora-rose-qsh2-protocol-contract = roseProtocolContract;
         };
 
         packages = {
-          aurora-loopback-host = auroraHost;
+          aurora-qshell-peer-host = auroraPeerHost;
+          aurora-qshell-peer-clara-deployment-tools = claraDeploymentTools;
           vivado = tools.vivado;
           hw_server = tools.hw_server;
           vitis_hls = tools.vitis_hls;
@@ -351,16 +475,16 @@
         // coyoteDriverPackages;
 
         apps = {
-          program-cli = mkApp tools.program-cli "program-cli";
-          deploy-hw = mkApp tools.deploy-hw "deploy-hw";
-          unload-driver = mkApp tools.unload-driver "unload-driver";
-          hot-reset = mkApp tools.hot-reset "hot-reset";
-          insert-driver = mkApp tools.insert-driver "insert-driver";
-          set-hugepages = mkApp tools.set-hugepages "set-hugepages";
+          program-cli = mkApp deploymentTools.program-cli "program-cli";
+          deploy-hw = mkApp deploymentTools.deploy-hw "deploy-hw";
+          unload-driver = mkApp deploymentTools.unload-driver "unload-driver";
+          hot-reset = mkApp deploymentTools.hot-reset "hot-reset";
+          insert-driver = mkApp deploymentTools.insert-driver "insert-driver";
+          set-hugepages = mkApp deploymentTools.set-hugepages "set-hugepages";
           vivado = mkApp tools.vivado "vivado";
           hw_server = mkApp tools.hw_server "hw_server";
           vitis_hls = mkApp tools.vitis_hls "vitis_hls";
-          aurora-loopback = mkApp auroraHost "aurora-loopback";
+          aurora-qshell-peer = mkApp auroraPeerHost "aurora-qshell-peer";
         };
 
         formatter = pkgs.nixfmt-rfc-style;
