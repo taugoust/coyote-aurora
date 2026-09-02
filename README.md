@@ -1,6 +1,6 @@
 # Aurora QShell peer bridge
 
-This repository provides the Clara-side endpoint for an end-to-end QShell peer-path test over the existing Rose ↔ Clara QSFP1 cable.
+This repository provides the Clara-side endpoint for end-to-end QShell peer-path tests over the existing Rose ↔ Clara QSFP1 cable. It supports both a Helios d3 decode and a one-beat opaque-loopback oracle for isolating QShell control and peer routing from decoder behavior.
 
 ## Architecture
 
@@ -11,25 +11,29 @@ Clara host
 host/Aurora bridge vFPGA
   │ Aurora 64B/66B, QSFP1
   ▼
-Rose QShell peer ingress → Helios d3 → QShell peer egress
+Rose QShell peer ingress → selected service → QShell peer egress
+                              (opaque loopback or Helios d3)
   │
   └──────────────── Aurora correction response ───────────────► Clara host
 ```
 
-Rose keeps its accepted aggregate QShell/Helios image unchanged. That deployed image is Helios commit `ed250d5048f43b98ac2969666f16aaea4980982c`, QShell commit `c4179da5303db1007a6c5ecdc69b8e51c70b1f14`, and bitstream SHA-256 `552286a9828e75aac7cda1f98ea59b4e77df034c04c7d0440d4b4cdb792de7fd`. Clara runs a Coyote image with a transparent bidirectional bridge:
+Clara runs a Coyote image with a transparent bidirectional bridge. The legacy Helios d3 test was designed for Rose's aggregate image at Helios commit `ed250d5048f43b98ac2969666f16aaea4980982c`, QShell commit `c4179da5303db1007a6c5ecdc69b8e51c70b1f14`, and bitstream SHA-256 `552286a9828e75aac7cda1f98ea59b4e77df034c04c7d0440d4b4cdb792de7fd`. The opaque-loopback test instead requires a separately accepted Rose image containing the corrected loopback service and resident-control boundary; it does not require rebuilding or reprogramming Clara's bridge image.
+
+The Clara datapath is:
 
 - host receive → two-entry registered queue → Aurora transmit;
 - Aurora receive → two-entry registered queue → host transmit.
 
-The queues preserve `tdata`, `tkeep`, and `tlast`, isolate downstream ready paths, and sustain one beat per cycle without stalls. This initial bridge accepts only complete one-beat records, matching Helios d3. A request queued toward a failed link is discarded; a complete correction already accepted from Aurora remains a valid host transfer and is never retracted under host backpressure.
+The queues preserve `tdata`, `tkeep`, and `tlast`, isolate downstream ready paths, and sustain one beat per cycle without stalls. This initial bridge accepts only complete one-beat records, matching Helios d3 and the opaque oracle. A request queued toward a failed link is discarded; a complete correction already accepted from Aurora remains a valid host transfer and is never retracted under host backpressure.
 
-The Coyote input is pinned to Rose's exact revision `6b9b0ae2b2928d9d0c9afce4313fcec3f128b705`. This matches the four-lane 25.78125 Gb/s Aurora framing, 512-bit shell CDC, QSFP1 constraints, and Immediate NFC configuration used by the deployed Rose image.
+The Clara Coyote input is pinned to revision `6b9b0ae2b2928d9d0c9afce4313fcec3f128b705`. This matches the four-lane 25.78125 Gb/s Aurora framing, 512-bit shell CDC, QSFP1 constraints, and Immediate NFC configuration used by both the legacy Rose image and its descendant resident-control repair. Host-side QSH2 encoding and validation consume the generated ABI header from pinned QShell revision `e9cfaabae0abfc779bcd3ca4c8974778f73720df`; this repository does not define a second set of record constants or offsets.
 
 ## Device-free validation
 
 ```bash
 nix build -L .#checks.x86_64-linux.aurora-peer-bridge-stream-regression
 nix build -L .#checks.x86_64-linux.aurora-loopback-csr-regression
+nix build -L .#checks.x86_64-linux.aurora-rose-qsh2-protocol-contract
 nix build -L .#aurora-qshell-peer-host
 nix flake check --no-build
 ```
@@ -80,7 +84,23 @@ set-hugepages
 insert-driver "$driver" "$image"
 ```
 
-Do not run this sequence on Rose; Rose must retain the accepted QShell/Helios image.
+Do not run this Clara deployment sequence on Rose. Any Rose personality change is a separate reviewed operation with Rose's own fixed BDF and JTAG target.
+
+## Run the opaque-loopback oracle
+
+First configure Rose service endpoint `20` as available with a one-beat exclusive scheduler. Install capability `1` for context `4660`, physical peer source/correction endpoint `0x80000001`, initial round/version `1/1`, and use `QSHELL_SCHEMA_OPAQUE_LOOPBACK` (`0x00000001`) for both syndrome and correction schemas.
+
+Then run on Clara:
+
+```bash
+/nix/store/<host-output>/bin/aurora-qshell-loopback \
+  --context 4660 --round 1 --route 1 --route-version 1 \
+  --wire-source 305419896 --peer-endpoint 2147483649 \
+  --service-endpoint 20 --payload-hex a55a00ff11223344 \
+  --device 0 --timeout-ms 2000 --verbose
+```
+
+The oracle requires current ABI magic/version, correction class, opaque schema, preserved context/round/capability/flags/payload, service source endpoint `20`, authenticated peer destination `0x80000001`, active route version `1`, and correction sequence zero. The deliberately different wire source proves Rose replaced the untrusted ingress source before service dispatch.
 
 ## Run a peer decode
 

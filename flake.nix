@@ -16,6 +16,10 @@
       inputs.flake-utils.follows = "flake-utils";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    qshell = {
+      url = "git+ssh://git@github.com/TUM-DSE/QShell.git?ref=master&rev=e9cfaabae0abfc779bcd3ca4c8974778f73720df";
+      flake = false;
+    };
     deployment-coyote = {
       url = "git+ssh://git@github.com/taugoust/Coyote.git?ref=linux-7-driver-compat&rev=0e4e5ae66f42f53436d9b31f56d0704ccab9dbfb";
       flake = false;
@@ -40,6 +44,7 @@
       nixpkgs,
       flake-utils,
       coyote,
+      qshell,
       xdb,
       ...
     }:
@@ -57,6 +62,7 @@
         lib = pkgs.lib;
         isX86_64 = pkgs.stdenv.hostPlatform.isx86_64;
         coyoteRoot = coyote;
+        qshellRoot = qshell;
         deploymentCoyoteRoot = inputs.deployment-coyote;
         deploymentCoyoteNix = inputs.deployment-coyote-nix;
         doctor = doctorClusterXilinx.lib.mkXilinxContext { inherit pkgs system; };
@@ -191,14 +197,18 @@
         roseProtocolContract = pkgs.runCommand "aurora-rose-qsh2-protocol-contract" { } ''
           diff -u ${inputs.rose-helios}/sw/include/helios/helios_protocol.h \
             ${./sw/include/helios/helios_protocol.h}
-          diff -u ${inputs.rose-helios}/sw/include/helios/helios_qshell_protocol.h \
-            ${./sw/include/helios/helios_qshell_protocol.h}
           diff -u ${inputs.rose-helios}/sw/src/helios_protocol.cpp \
             ${./sw/src/helios_protocol.cpp}
-          diff -u ${inputs.rose-helios}/sw/src/helios_qshell_protocol.cpp \
-            ${./sw/src/helios_qshell_protocol.cpp}
-          grep -F 'qshellRevision = "c4179da5303db1007a6c5ecdc69b8e51c70b1f14";' \
-            ${inputs.rose-helios}/flake.nix >/dev/null
+          grep -F '#include <qshell/qshell_abi_generated.hpp>' \
+            ${./sw/include/aurora/qsh2_record.h} >/dev/null
+          grep -F '::qshell::abi::schema_helios_phenom_syndrome' \
+            ${./sw/include/helios/helios_qshell_protocol.h} >/dev/null
+          if grep -RE \
+            'COYOTE_HOST_STREAM_BEAT_BYTES|record_abi_version[[:space:]]*=[[:space:]]*2|record_header_bytes[[:space:]]*=[[:space:]]*48|schema_(opaque_loopback|helios_[a-z_]+)[[:space:]]*=[[:space:]]*0x' \
+            ${./sw/include} ${./sw/src}; then
+            echo 'Aurora host source contains a hand-written QSH2 ABI definition' >&2
+            exit 1
+          fi
           touch "$out"
         '';
 
@@ -216,9 +226,11 @@
           buildInputs = with pkgs; [ boost ];
 
           COYOTE_ROOT = coyoteRoot;
+          QSHELL_ROOT = qshellRoot;
           cmakeFlags = [
             "-DCMAKE_POLICY_VERSION_MINIMUM=3.10"
             "-DCMAKE_POLICY_DEFAULT_CMP0167=OLD"
+            "-DQSHELL_ROOT=${qshellRoot}"
           ]
           ++ lib.optionals (!isX86_64) [ "-DEN_AVX=0" ];
 
@@ -226,9 +238,10 @@
             runHook preInstall
 
             mkdir -p $out/bin $out/lib $out/libexec
-            install -m755 aurora-qshell-peer $out/libexec/aurora-qshell-peer
+            for program in aurora-qshell-peer aurora-qshell-loopback; do
+              install -m755 "$program" "$out/libexec/$program"
 
-            cat > $out/bin/aurora-qshell-peer <<EOF
+              cat > "$out/bin/$program" <<EOF
             #!${pkgs.runtimeShell}
             set -euo pipefail
 
@@ -242,9 +255,10 @@
               fi
             done
             umask 000
-            exec $out/libexec/aurora-qshell-peer "\$@"
+            exec "$out/libexec/$program" "\$@"
             EOF
-            chmod +x $out/bin/aurora-qshell-peer
+              chmod +x "$out/bin/$program"
+            done
 
             copied=0
             while IFS= read -r -d $'\0' lib; do
@@ -263,7 +277,9 @@
                 pkgs.stdenv.cc.cc
               ]
             }"
-            patchelf --set-rpath "$lib_path" $out/libexec/aurora-qshell-peer
+            for program in aurora-qshell-peer aurora-qshell-loopback; do
+              patchelf --set-rpath "$lib_path" "$out/libexec/$program"
+            done
 
             for so in $out/lib/*.so*; do
               [ -e "$so" ] || continue
@@ -354,6 +370,7 @@
 
         compileCommandsHook = ''
           ${doctor.hostFpgaEnvShellFragment}
+          export QSHELL_ROOT=${qshellRoot}
 
           if [ "''${AURORA_SKIP_AUTO_COMPILE_COMMANDS:-0}" != "1" ]; then
             project_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
@@ -485,6 +502,7 @@
           hw_server = mkApp tools.hw_server "hw_server";
           vitis_hls = mkApp tools.vitis_hls "vitis_hls";
           aurora-qshell-peer = mkApp auroraPeerHost "aurora-qshell-peer";
+          aurora-qshell-loopback = mkApp auroraPeerHost "aurora-qshell-loopback";
         };
 
         formatter = pkgs.nixfmt-rfc-style;

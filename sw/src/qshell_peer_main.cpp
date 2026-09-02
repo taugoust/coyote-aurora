@@ -89,15 +89,15 @@ int run_main(int argc, char* argv[]) {
     std::string noise_model = "phenom";
     std::uint32_t context_id = 0;
     std::uint32_t round_id = 0;
-    std::uint32_t schema_id = helios::qshell::schema_helios_phenom_syndrome;
+    std::uint32_t schema_id = ::qshell::abi::schema_helios_phenom_syndrome;
     std::uint32_t source_endpoint_id = 0x12345678u;
     std::uint32_t peer_endpoint_id = 0x80000001u;
     std::uint32_t decoder_endpoint_id = 0;
     std::uint32_t route_capability_id = 1;
     std::uint32_t expected_route_version = 0;
     std::uint32_t record_sequence = 0;
-    std::uint32_t flags = helios::qshell::flag_end_of_round;
-    constexpr int COYOTE_HOST_STREAM_BEAT_BYTES = 64;
+    std::uint32_t flags = ::qshell::abi::flag_end_of_round;
+    constexpr std::size_t host_stream_beat_bytes = ::qshell::abi::beat_bytes;
     int rx_window = 0;
     int device = 0;
 
@@ -112,18 +112,18 @@ int run_main(int argc, char* argv[]) {
         ("qshell", po::bool_switch(&qshell_record), "Wrap the native Helios request in a QSH2 record")
         ("context", po::value<std::uint32_t>(&context_id)->default_value(0), "QShell context id")
         ("round", po::value<std::uint32_t>(&round_id)->default_value(0), "QShell round id")
-        ("schema", po::value<std::uint32_t>(&schema_id)->default_value(helios::qshell::schema_helios_phenom_syndrome), "QShell syndrome schema id")
+        ("schema", po::value<std::uint32_t>(&schema_id)->default_value(::qshell::abi::schema_helios_phenom_syndrome), "QShell syndrome schema id")
         ("source-endpoint", po::value<std::uint32_t>(&source_endpoint_id)->default_value(0x12345678u), "Untrusted source id sent on the wire before Rose stamps it")
         ("peer-endpoint", po::value<std::uint32_t>(&peer_endpoint_id)->default_value(0x80000001u), "Authenticated Aurora endpoint expected in the correction destination")
         ("decoder-endpoint", po::value<std::uint32_t>(&decoder_endpoint_id)->default_value(0), "Expected correction producer endpoint id")
         ("route", po::value<std::uint32_t>(&route_capability_id)->default_value(1), "QShell route capability id")
         ("route-version", po::value<std::uint32_t>(&expected_route_version)->default_value(0), "Expected active route version")
         ("sequence", po::value<std::uint32_t>(&record_sequence)->default_value(0), "QShell request sequence")
-        ("flags", po::value<std::uint32_t>(&flags)->default_value(helios::qshell::flag_end_of_round), "QShell flags")
+        ("flags", po::value<std::uint32_t>(&flags)->default_value(::qshell::abi::flag_end_of_round), "QShell flags")
         ("timeout-ms", po::value<int>(&timeout_ms)->default_value(1000), "Roundtrip timeout in milliseconds")
         ("distance,d", po::value<int>(&distance)->default_value(3), "Helios code distance; used to size the receive window")
         ("noise-model", po::value<std::string>(&noise_model)->default_value("phenom"), "Hardware noise model: phenom or circuit; used to size the receive window")
-        ("rx-window", po::value<int>(&rx_window)->default_value(0), "Receive DMA window in bytes; 0 chooses a distance/noise-model-derived 64-byte-aligned window")
+        ("rx-window", po::value<int>(&rx_window)->default_value(0), "Receive DMA window in bytes; 0 chooses a distance/noise-model-derived beat-aligned window")
         ("device", po::value<int>(&device)->default_value(0), "Coyote device index used for /dev/coyote_fpga_<device>_v0")
         ("verbose,v", po::bool_switch(&verbose), "Enable verbose logging");
 
@@ -156,9 +156,10 @@ int run_main(int argc, char* argv[]) {
 
     const auto native_response_bytes = helios_response_bytes_for_distance(distance, noise_model);
     const auto expected_response_bytes = native_response_bytes +
-        (qshell_record ? helios::qshell::record_header_bytes : 0);
+        (qshell_record ? ::qshell::abi::header_bytes : 0);
     if (rx_window == 0) {
-        rx_window = static_cast<int>(round_up(expected_response_bytes, COYOTE_HOST_STREAM_BEAT_BYTES));
+        rx_window = static_cast<int>(
+            round_up(expected_response_bytes, host_stream_beat_bytes));
     } else if (rx_window < 0) {
         throw std::runtime_error("rx-window must be non-negative");
     } else if (static_cast<std::size_t>(rx_window) < expected_response_bytes) {
@@ -196,8 +197,9 @@ int run_main(int argc, char* argv[]) {
         tx = helios::encode_request(req);
     }
 
-    if (qshell_record && tx.size() > COYOTE_HOST_STREAM_BEAT_BYTES) {
-        throw std::runtime_error("the initial QShell/Helios adapter accepts one 64-byte request beat");
+    if (qshell_record && tx.size() > host_stream_beat_bytes) {
+        throw std::runtime_error(
+            "the initial QShell/Helios adapter accepts one request beat");
     }
 
     if (verbose) {
@@ -207,7 +209,8 @@ int run_main(int argc, char* argv[]) {
                   << " expected_response_bytes=" << expected_response_bytes
                   << " rx_window=" << rx_window << "\n";
         std::cout << "TX bytes: " << tx.size() << "\n";
-        std::cout << "TX[0:64]: " << helios::to_hex_string(tx, 64) << "\n";
+        std::cout << "TX first beat: "
+                  << helios::to_hex_string(tx, host_stream_beat_bytes) << "\n";
     }
 
     helios::HeliosCoyoteTransport transport(
@@ -226,7 +229,8 @@ int run_main(int argc, char* argv[]) {
 
     if (verbose) {
         std::cout << "RX bytes: " << rx.size() << "\n";
-        std::cout << "RX[0:64]: " << helios::to_hex_string(rx, 64) << "\n";
+        std::cout << "RX first beat: "
+                  << helios::to_hex_string(rx, host_stream_beat_bytes) << "\n";
     }
 
     helios::HeliosDecodeResponse rsp;

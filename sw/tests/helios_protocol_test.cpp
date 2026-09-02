@@ -2,6 +2,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include <aurora/qsh2_record.h>
 #include <helios/helios_protocol.h>
 #include <helios/helios_qshell_protocol.h>
 
@@ -84,6 +85,138 @@ int main() {
     return 1;
   } catch (const std::runtime_error &) {
   }
+
+  aurora::qsh2::RecordHeader opaque_request;
+  opaque_request.context_id = 4660;
+  opaque_request.round_id = 1;
+  opaque_request.schema_id = ::qshell::abi::schema_opaque_loopback;
+  opaque_request.source_endpoint_id = 0x12345678;
+  opaque_request.route_capability_id = 1;
+  const std::vector<std::uint8_t> opaque_payload = {
+      0xa5, 0x5a, 0x00, 0xff, 0x11, 0x22, 0x33, 0x44};
+  const std::vector<std::uint8_t> expected_opaque_tx = {
+      0x51, 0x53, 0x48, 0x32, 0x02, 0x01, 0x01, 0x00, 0x30, 0x00, 0x00,
+      0x00, 0x08, 0x00, 0x00, 0x00, 0x34, 0x12, 0x00, 0x00, 0x01, 0x00,
+      0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x78, 0x56, 0x34, 0x12, 0x00,
+      0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0xa5, 0x5a, 0x00, 0xff, 0x11, 0x22, 0x33,
+      0x44,
+  };
+  const auto opaque_tx =
+      aurora::qsh2::encode_record(opaque_request, opaque_payload);
+  if (opaque_tx != expected_opaque_tx ||
+      opaque_tx.size() >= ::qshell::abi::beat_bytes ||
+      ((std::uint64_t{1} << opaque_tx.size()) - 1) !=
+          std::uint64_t{0x00ffffffffffffffULL}) {
+    std::cerr << "QSH2 opaque request golden bytes or valid mask changed\n";
+    return 1;
+  }
+  auto invalid_flag_header = opaque_request;
+  invalid_flag_header.flags = ::qshell::abi::flag_control_response;
+  try {
+    (void)aurora::qsh2::encode_record(invalid_flag_header, opaque_payload);
+    std::cerr << "QSH2 syndrome with a control-response flag was accepted\n";
+    return 1;
+  } catch (const std::runtime_error &) {
+  }
+
+  invalid_flag_header.record_class =
+      static_cast<std::uint8_t>(::qshell::abi::record_class::control);
+  invalid_flag_header.flags = ::qshell::abi::flag_end_of_round;
+  try {
+    (void)aurora::qsh2::encode_record(invalid_flag_header, opaque_payload);
+    std::cerr << "QSH2 control record with an end-of-round flag was accepted\n";
+    return 1;
+  } catch (const std::runtime_error &) {
+  }
+
+  invalid_flag_header.record_class =
+      static_cast<std::uint8_t>(::qshell::abi::record_class::error);
+  invalid_flag_header.flags = ::qshell::abi::flag_control_response;
+  try {
+    (void)aurora::qsh2::encode_record(invalid_flag_header, opaque_payload);
+    std::cerr << "QSH2 error record with a flag was accepted\n";
+    return 1;
+  } catch (const std::runtime_error &) {
+  }
+
+  auto invalid_flag_wire = opaque_tx;
+  invalid_flag_wire.at(::qshell::abi::offset::flags) =
+      static_cast<std::uint8_t>(::qshell::abi::flag_control_response);
+  try {
+    (void)aurora::qsh2::decode_record(invalid_flag_wire);
+    std::cerr << "QSH2 wire syndrome with a control-response flag was accepted\n";
+    return 1;
+  } catch (const std::runtime_error &) {
+  }
+
+  aurora::qsh2::RecordHeader control_header;
+  control_header.record_class =
+      static_cast<std::uint8_t>(::qshell::abi::record_class::control);
+  control_header.flags = ::qshell::abi::flag_control_response;
+  const auto control_record =
+      aurora::qsh2::decode_record(aurora::qsh2::encode_record(control_header, {}));
+  if (control_record.header.flags != ::qshell::abi::flag_control_response) {
+    std::cerr << "QSH2 valid control-response flag was rejected\n";
+    return 1;
+  }
+
+  const auto decoded_request = aurora::qsh2::decode_record(opaque_tx);
+  if (decoded_request.header.schema_id !=
+          ::qshell::abi::schema_opaque_loopback ||
+      decoded_request.payload != opaque_payload) {
+    std::cerr << "QSH2 opaque request round-trip failed\n";
+    return 1;
+  }
+
+  const std::vector<std::uint8_t> expected_opaque_rx = {
+      0x51, 0x53, 0x48, 0x32, 0x02, 0x02, 0x01, 0x00, 0x30, 0x00, 0x00,
+      0x00, 0x08, 0x00, 0x00, 0x00, 0x34, 0x12, 0x00, 0x00, 0x01, 0x00,
+      0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x14, 0x00, 0x00, 0x00, 0x01,
+      0x00, 0x00, 0x80, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0xa5, 0x5a, 0x00, 0xff, 0x11, 0x22, 0x33,
+      0x44,
+  };
+  auto opaque_rx = expected_opaque_rx;
+  opaque_rx.resize(::qshell::abi::beat_bytes, 0);
+  const auto opaque_response = aurora::qsh2::decode_record(opaque_rx);
+  aurora::qsh2::validate_opaque_loopback_response(
+      opaque_response, opaque_request, opaque_payload, 20, 0x80000001, 1);
+
+  const auto expect_opaque_rejection = [&](const auto &candidate,
+                                           const char *field) {
+    try {
+      aurora::qsh2::validate_opaque_loopback_response(
+          candidate, opaque_request, opaque_payload, 20, 0x80000001, 1);
+      std::cerr << "QSH2 opaque " << field << " mismatch was accepted\n";
+      return false;
+    } catch (const std::runtime_error &) {
+      return true;
+    }
+  };
+
+  auto mutated_response = opaque_response;
+  mutated_response.header.record_class = static_cast<std::uint8_t>(
+      ::qshell::abi::record_class::syndrome);
+  if (!expect_opaque_rejection(mutated_response, "class")) return 1;
+  mutated_response = opaque_response;
+  mutated_response.header.schema_id++;
+  if (!expect_opaque_rejection(mutated_response, "schema")) return 1;
+  mutated_response = opaque_response;
+  mutated_response.header.source_endpoint_id++;
+  if (!expect_opaque_rejection(mutated_response, "source")) return 1;
+  mutated_response = opaque_response;
+  mutated_response.header.destination_endpoint_id++;
+  if (!expect_opaque_rejection(mutated_response, "destination")) return 1;
+  mutated_response = opaque_response;
+  mutated_response.header.route_version++;
+  if (!expect_opaque_rejection(mutated_response, "route version")) return 1;
+  mutated_response = opaque_response;
+  mutated_response.header.record_sequence++;
+  if (!expect_opaque_rejection(mutated_response, "sequence")) return 1;
+  mutated_response = opaque_response;
+  mutated_response.payload[0] ^= 0xff;
+  if (!expect_opaque_rejection(mutated_response, "payload")) return 1;
 
   std::cout << "helios_protocol_selftest: OK\n";
   return 0;

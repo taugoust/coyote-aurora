@@ -830,6 +830,24 @@
         "type": "github"
       }
     },
+    "qshell": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1788374313,
+        "narHash": "sha256-TbEI1NDbuMvVAkj6sGB6U/opNItUL4pHrEy9WiJZzrs=",
+        "ref": "master",
+        "rev": "e9cfaabae0abfc779bcd3ca4c8974778f73720df",
+        "revCount": 100,
+        "type": "git",
+        "url": "ssh://git@github.com/TUM-DSE/QShell.git"
+      },
+      "original": {
+        "ref": "master",
+        "rev": "e9cfaabae0abfc779bcd3ca4c8974778f73720df",
+        "type": "git",
+        "url": "ssh://git@github.com/TUM-DSE/QShell.git"
+      }
+    },
     "root": {
       "inputs": {
         "coyote": "coyote",
@@ -839,6 +857,7 @@
         "doctor-cluster-xilinx": "doctor-cluster-xilinx",
         "flake-utils": "flake-utils_3",
         "nixpkgs": "nixpkgs_2",
+        "qshell": "qshell",
         "rose-helios": "rose-helios",
         "xdb": "xdb"
       }
