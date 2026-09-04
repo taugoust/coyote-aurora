@@ -608,6 +608,30 @@ module aurora_host_peer_bridge_tb;
                 host_transfer_cycles[host_cycle_index] + index)
                 fail("continuous peer-to-host records inserted a bubble");
         end
+
+        // One-beat records publish address zero on the same edge that writes
+        // it. Keep both source and sink continuously active across that bank
+        // boundary to protect the registered collision bypass in each
+        // direction without weakening the general 65-beat throughput proof.
+        host_before = host_received;
+        peer_before = peer_received;
+        peer_cycle_index = peer_transfer_cycles.size();
+        drive_two_host_records_without_stall(
+            D3_PAYLOAD_BYTES, 8'h3c,
+            D3_PAYLOAD_BYTES, 8'h3d);
+        wait_for_counts(host_before, peer_before + 2);
+        if (peer_transfer_cycles[peer_cycle_index + 1] !=
+            peer_transfer_cycles[peer_cycle_index] + 1)
+            fail("continuous one-beat host records inserted a bubble");
+
+        host_cycle_index = host_transfer_cycles.size();
+        drive_two_peer_records_without_stall(
+            D3_PAYLOAD_BYTES, 8'hbc,
+            D3_PAYLOAD_BYTES, 8'hbd);
+        wait_for_counts(host_before + 2, peer_before + 2);
+        if (host_transfer_cycles[host_cycle_index + 1] !=
+            host_transfer_cycles[host_cycle_index] + 1)
+            fail("continuous one-beat peer records inserted a bubble");
         host_out_ready = 1'b0;
         peer_out_ready = 1'b0;
 

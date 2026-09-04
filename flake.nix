@@ -216,6 +216,152 @@
               cp regression.log "$out/"
             '';
 
+        recordFifoMemoryStructure =
+          pkgs.runCommand "aurora-record-fifo-memory-structure"
+            {
+              nativeBuildInputs = with pkgs; [
+                python3
+                yosys
+              ];
+            }
+            ''
+              cp -R ${bridgeRegressionSource} source
+              chmod -R u+w source
+
+              yosys -ql yosys.log -p '
+                read_verilog -sv -DSYNTHESIS -Isource/src/hdl source/src/hdl/qshell_record_first_beat.sv source/src/hdl/axis_record_fifo_2.sv
+                hierarchy -check -top axis_record_fifo_2
+                proc
+                opt_clean
+                memory_dff
+                memory_collect
+                write_json netlist.json
+              '
+
+              python3 - netlist.json <<'PY'
+              import json
+              import sys
+
+              def parameter_int(cell, name):
+                  value = cell.get("parameters", {}).get(name, "0")
+                  return int(value, 2) if isinstance(value, str) else int(value)
+
+              with open(sys.argv[1], encoding="utf-8") as stream:
+                  design = json.load(stream)
+              cells = design["modules"]["axis_record_fifo_2"]["cells"].values()
+              memories = [
+                  (parameter_int(cell, "WIDTH"), parameter_int(cell, "SIZE"))
+                  for cell in cells
+                  if cell["type"] in {"$mem", "$mem_v2"}
+              ]
+              payload_memories = [
+                  (width, size)
+                  for width, size in memories
+                  if width >= 512 and size >= 65
+              ]
+              if len(payload_memories) < 2:
+                  raise SystemExit(
+                      "expected two independent >=65x512 inferred payload memories; "
+                      f"observed memories: {memories}"
+                  )
+
+              sequential_types = {
+                  "$dff", "$dffe", "$dffsr", "$adff", "$adffe", "$sdff",
+                  "$sdffe", "$sdffce", "$aldff", "$aldffe",
+              }
+              ff_bits = sum(
+                  parameter_int(cell, "WIDTH")
+                  for cell in cells
+                  if cell["type"] in sequential_types
+              )
+              if ff_bits >= 65 * 512:
+                  raise SystemExit(
+                      "record FIFO still contains a payload-bank-sized FF array: "
+                      f"{ff_bits} sequential bits"
+                  )
+              print(
+                  "PASS: record FIFO uses independent inferred payload memories "
+                  f"without wide FF banks ({payload_memories}, {ff_bits} FF bits)"
+              )
+              PY
+
+              mkdir -p "$out"
+              cp yosys.log netlist.json "$out/"
+            '';
+
+        recordFifoU280OocAudit =
+          pkgs.runCommand "aurora-record-fifo-u280-ooc-audit"
+            {
+              nativeBuildInputs = [
+                doctor.xilinxShell
+                tools.vivado
+              ];
+              COYOTE_NIX_XILINX_SHELL = "${doctor.xilinxShell}/bin/xilinx-shell";
+              COYOTE_NIX_XILINX_SHARE_ROOT = toString xilinxShareRoot;
+              COYOTE_NIX_XILINX_VERSION = doctor.boards.u280.xilinxVersion;
+              COYOTE_NIX_NCURSES6_LIB = "${pkgs.ncurses6}/lib/libtinfo.so.6";
+              __impureHostDeps = [ (toString xilinxShareRoot) ];
+              src = hwSource;
+            }
+            ''
+              mkdir -p "$out" "$TMPDIR/home"
+              export HOME="$TMPDIR/home"
+              cat > audit.xdc <<'EOF'
+              create_clock -name aclk -period 4.000 [get_ports aclk]
+              EOF
+              cat > audit.tcl <<'EOF'
+              set_param general.maxThreads 2
+              read_verilog -sv [list \
+                  $::env(src)/src/hdl/qshell_record_first_beat.sv \
+                  $::env(src)/src/hdl/axis_record_fifo_2.sv \
+                  $::env(src)/src/hdl/aurora_host_peer_bridge.sv]
+              read_xdc audit.xdc
+              synth_design -top aurora_host_peer_bridge \
+                -part xcu280-fsvh2892-2L-e -mode out_of_context \
+                -flatten_hierarchy rebuilt
+
+              set brams [get_cells -hier -filter {REF_NAME =~ RAMB*}]
+              set urams [get_cells -hier -filter {REF_NAME =~ URAM*}]
+              set flops [get_cells -hier -filter {REF_NAME =~ FD*}]
+              set luts [get_cells -hier -filter {REF_NAME =~ LUT*}]
+              set memory_primitives [expr {[llength $brams] + [llength $urams]}]
+              set setup_paths [get_timing_paths -setup -max_paths 1]
+              if {[llength $setup_paths] != 1} {
+                error "record FIFO OOC audit found no setup path"
+              }
+              set setup_wns [get_property SLACK [lindex $setup_paths 0]]
+
+              puts "AURORA_RECORD_FIFO_OOC brams=[llength $brams] urams=[llength $urams] flops=[llength $flops] luts=[llength $luts] setup_wns=$setup_wns"
+              if {$memory_primitives < 4} {
+                error "record payload banks did not map to physical memories"
+              }
+              if {[llength $flops] >= 10000} {
+                error "record payload storage expanded into wide flip-flop banks"
+              }
+              if {[llength $luts] >= 20000} {
+                error "record FIFO OOC logic exceeds its resource envelope"
+              }
+              if {$setup_wns < 0.0} {
+                error "record FIFO OOC setup timing does not close at 250 MHz"
+              }
+
+              report_utilization -hierarchical -file $::env(out)/utilization.rpt
+              report_timing_summary -delay_type min_max -max_paths 50 \
+                -file $::env(out)/timing-summary.rpt
+              report_timing -setup -max_paths 100 -path_type full_clock_expanded \
+                -file $::env(out)/setup-paths.rpt
+              report_timing -hold -max_paths 100 -path_type full_clock_expanded \
+                -file $::env(out)/hold-paths.rpt
+              check_timing -verbose -file $::env(out)/check-timing.rpt
+              write_checkpoint -force $::env(out)/aurora_record_fifo_ooc.dcp
+              EOF
+
+              nice -n 10 vivado -mode batch -source audit.tcl 2>&1 \
+                | tee "$out/vivado.log"
+              grep -F 'AURORA_RECORD_FIFO_OOC' "$out/vivado.log" \
+                > "$out/summary.txt"
+            '';
+
         roseProtocolContract = pkgs.runCommand "aurora-rose-qsh2-protocol-contract" { } ''
           diff -u ${inputs.rose-helios}/sw/include/helios/helios_protocol.h \
             ${./sw/include/helios/helios_protocol.h}
@@ -525,6 +671,7 @@
         checks = {
           aurora-loopback-csr-regression = auroraCsrRegression;
           aurora-peer-bridge-stream-regression = auroraBridgeRegression;
+          aurora-record-fifo-memory-structure = recordFifoMemoryStructure;
           aurora-qsh2-host-regression = auroraPeerHost;
           aurora-rose-qsh2-protocol-contract = roseProtocolContract;
         };
@@ -532,6 +679,7 @@
         packages = {
           aurora-qshell-peer-host = auroraPeerHost;
           aurora-qshell-peer-clara-deployment-tools = claraDeploymentTools;
+          aurora-record-fifo-u280-ooc-audit = recordFifoU280OocAudit;
           vivado = tools.vivado;
           hw_server = tools.hw_server;
           vitis_hls = tools.vitis_hls;

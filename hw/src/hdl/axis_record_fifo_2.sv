@@ -37,10 +37,17 @@ module axis_record_fifo_2 #(
               QSHELL_BEAT_BYTES - 1) / QSHELL_BEAT_BYTES);
     localparam int BEAT_INDEX_W =
         MAX_RECORD_BEATS <= 1 ? 1 : $clog2(MAX_RECORD_BEATS);
+    localparam int RECORD_BEAT_W = DATA_W + KEEP_W + 1;
 
-    logic [DATA_W-1:0] data_bank [2][MAX_RECORD_BEATS];
-    logic [KEEP_W-1:0] keep_bank [2][MAX_RECORD_BEATS];
-    logic last_bank [2][MAX_RECORD_BEATS];
+    logic [1:0] memory_write_enable;
+    logic [BEAT_INDEX_W-1:0] memory_write_address;
+    logic [RECORD_BEAT_W-1:0] memory_write_data;
+    logic [1:0] memory_read_enable;
+    logic [1:0][BEAT_INDEX_W-1:0] memory_read_address;
+    logic [1:0][RECORD_BEAT_W-1:0] memory_read_data;
+    logic [1:0] single_beat_prefetch_valid;
+    logic [1:0][RECORD_BEAT_W-1:0] single_beat_prefetch_data;
+    logic [RECORD_BEAT_W-1:0] output_word;
     logic [1:0] bank_reserved;
     logic [1:0] bank_complete;
     logic read_bank;
@@ -60,6 +67,10 @@ module axis_record_fifo_2 #(
     logic [KEEP_W-1:0] expected_continuation_keep;
     logic expected_continuation_last;
     logic continuation_valid;
+    logic accepted_first_beat;
+    logic accepted_continuation;
+    logic accepted_single_beat;
+    logic publish_record;
 
     qshell_record_first_beat inst_first_beat_checker (
         .data(s_tdata),
@@ -89,15 +100,34 @@ module axis_record_fifo_2 #(
             if (lane < valid_bytes)
                 value[lane] = 1'b1;
         end
-        return value;
+        low_keep = value;
     endfunction
+
+    // Keeping each record bank as an independent one-dimensional memory is
+    // required for block-memory inference. Each bank has one write port and a
+    // synchronous registered read port, so capture and drain can proceed in
+    // parallel without a wide combinational memory mux.
+    for (genvar bank = 0; bank < 2; bank++) begin : record_storage
+        (* ram_style = "block" *)
+        logic [RECORD_BEAT_W-1:0] memory [0:MAX_RECORD_BEATS-1];
+
+        always_ff @(posedge aclk) begin
+            if (memory_write_enable[bank])
+                memory[memory_write_address] <= memory_write_data;
+            if (memory_read_enable[bank])
+                memory_read_data[bank] <= memory[memory_read_address[bank]];
+        end
+    end
 
     always_comb begin : stream_control
         int expected_valid_bytes;
 
-        m_tdata = data_bank[read_bank][output_index];
-        m_tkeep = keep_bank[read_bank][output_index];
-        m_tlast = last_bank[read_bank][output_index];
+        output_word = single_beat_prefetch_valid[read_bank] ?
+                      single_beat_prefetch_data[read_bank] :
+                      memory_read_data[read_bank];
+        m_tdata = output_word[DATA_W-1:0];
+        m_tkeep = output_word[DATA_W +: KEEP_W];
+        m_tlast = output_word[RECORD_BEAT_W-1];
         m_tvalid = !flush && bank_complete[read_bank];
 
         // Once a record starts, its bank is private through exact framing
@@ -117,12 +147,50 @@ module axis_record_fifo_2 #(
         continuation_valid = capture_active && remaining_payload > 0 &&
                              s_tkeep == expected_continuation_keep &&
                              s_tlast == expected_continuation_last;
+
+        accepted_first_beat = input_fire && !discarding && !capture_active &&
+                              first_valid &&
+                              first_payload_bytes <= MAX_PAYLOAD_BYTES;
+        accepted_continuation = input_fire && !discarding && capture_active &&
+                                int'(capture_index) < MAX_RECORD_BEATS &&
+                                continuation_valid;
+        accepted_single_beat = accepted_first_beat && first_record_complete;
+        publish_record = accepted_single_beat ||
+                         (accepted_continuation && s_tlast);
+
+        memory_write_enable = '0;
+        memory_write_address = accepted_continuation ? capture_index : '0;
+        memory_write_data = {s_tlast, s_tkeep, s_tdata};
+        memory_read_enable = '0;
+        memory_read_address = '0;
+
+        if (accepted_first_beat || accepted_continuation)
+            memory_write_enable[write_bank] = 1'b1;
+
+        // A complete multi-beat record prefetches beat zero on its publication
+        // edge. A one-beat record is written to the same address on that edge,
+        // so its bank-local registered bypass supplies deterministic write/read
+        // collision behavior without compromising the canonical RAM template.
+        if (publish_record && !accepted_single_beat) begin
+            memory_read_enable[write_bank] = 1'b1;
+            memory_read_address[write_bank] = '0;
+        end
+
+        // On each accepted non-final output, synchronously prefetch the next
+        // word. The registered RAM response replaces the accepted word after
+        // the edge, retaining one output transfer per cycle and holding stable
+        // indefinitely under backpressure.
+        if (output_fire && !m_tlast) begin
+            memory_read_enable[read_bank] = 1'b1;
+            memory_read_address[read_bank] = output_index + 1'b1;
+        end
     end
 
     always_ff @(posedge aclk) begin
         if (!aresetn || flush) begin
             bank_reserved <= '0;
             bank_complete <= '0;
+            single_beat_prefetch_valid <= '0;
             read_bank <= 1'b0;
             write_bank <= 1'b0;
             capture_index <= '0;
@@ -135,6 +203,7 @@ module axis_record_fifo_2 #(
                 if (m_tlast) begin
                     bank_reserved[read_bank] <= 1'b0;
                     bank_complete[read_bank] <= 1'b0;
+                    single_beat_prefetch_valid[read_bank] <= 1'b0;
                     read_bank <= !read_bank;
                     output_index <= '0;
                 end else begin
@@ -146,6 +215,7 @@ module axis_record_fifo_2 #(
                 if (capture_active) begin
                     bank_reserved[write_bank] <= 1'b0;
                     bank_complete[write_bank] <= 1'b0;
+                    single_beat_prefetch_valid[write_bank] <= 1'b0;
                 end
                 capture_index <= '0;
                 remaining_payload <= '0;
@@ -163,11 +233,12 @@ module axis_record_fifo_2 #(
                         // before treating another beat as a fresh header.
                         discarding <= !s_tlast;
                     end else begin
-                        data_bank[write_bank][0] <= s_tdata;
-                        keep_bank[write_bank][0] <= s_tkeep;
-                        last_bank[write_bank][0] <= s_tlast;
                         bank_reserved[write_bank] <= 1'b1;
+                        single_beat_prefetch_valid[write_bank] <=
+                            first_record_complete;
                         if (first_record_complete) begin
+                            single_beat_prefetch_data[write_bank] <=
+                                memory_write_data;
                             bank_complete[write_bank] <= 1'b1;
                             write_bank <= !write_bank;
                         end else begin
@@ -184,14 +255,12 @@ module axis_record_fifo_2 #(
                     // is already complete.
                     bank_reserved[write_bank] <= 1'b0;
                     bank_complete[write_bank] <= 1'b0;
+                    single_beat_prefetch_valid[write_bank] <= 1'b0;
                     capture_index <= '0;
                     remaining_payload <= '0;
                     capture_active <= 1'b0;
                     discarding <= !s_tlast;
                 end else begin
-                    data_bank[write_bank][capture_index] <= s_tdata;
-                    keep_bank[write_bank][capture_index] <= s_tkeep;
-                    last_bank[write_bank][capture_index] <= s_tlast;
                     if (s_tlast) begin
                         bank_complete[write_bank] <= 1'b1;
                         write_bank <= !write_bank;
