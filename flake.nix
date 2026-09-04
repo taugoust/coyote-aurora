@@ -5,19 +5,19 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     flake-utils.url = "github:numtide/flake-utils";
     coyote = {
-      # Match the deployed Rose image's Aurora framing, 512-bit CDC, and
-      # Immediate NFC configuration exactly.
-      url = "github:taugoust/Coyote/6b9b0ae2b2928d9d0c9afce4313fcec3f128b705";
+      # Published runtime stack: whole-vector Aurora framing, narrow control,
+      # current application linking, and single-owner driver cleanup.
+      url = "github:taugoust/Coyote/dc614541f6e060232489dfcfd0e037363f16f48e";
       flake = false;
     };
     coyote-nix = {
-      url = "github:TUM-DSE/coyote-nix/master";
+      url = "github:TUM-DSE/coyote-nix/4f05f2e47282df3c0f9e004021df1bb9fd76132a";
       inputs.coyote.follows = "coyote";
       inputs.flake-utils.follows = "flake-utils";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     qshell = {
-      url = "git+ssh://git@github.com/TUM-DSE/QShell.git?ref=master&rev=e9cfaabae0abfc779bcd3ca4c8974778f73720df";
+      url = "git+ssh://git@github.com/TUM-DSE/QShell.git?ref=aurora-d3-runtime-stack&rev=18062942cbdf12dd124e740338ba72530f589e0b";
       flake = false;
     };
     deployment-coyote = {
@@ -82,13 +82,30 @@
         };
         mkApp = deploymentCoyoteNix.lib.mkApp;
 
-        hwSource = lib.fileset.toSource {
+        addGeneratedQsh2Hdl =
+          name: source:
+          pkgs.runCommand name { } ''
+            mkdir -p "$out"
+            cp -R ${source}/. "$out/"
+            chmod -R u+w "$out"
+            mkdir -p "$out/src/hdl"
+            install -m0444 \
+              ${qshellRoot}/hw/src/abi/hdl/qshell_abi_generated.svh \
+              "$out/src/hdl/qshell_abi_generated.svh"
+            install -m0444 \
+              ${qshellRoot}/hw/src/abi/hdl/qshell_record_first_beat.sv \
+              "$out/src/hdl/qshell_record_first_beat.sv"
+          '';
+
+        localHwSource = lib.fileset.toSource {
           root = ./hw;
           fileset = lib.fileset.unions [
             ./hw/CMakeLists.txt
             ./hw/src
           ];
         };
+
+        hwSource = addGeneratedQsh2Hdl "aurora-qsh2-hw-source" localHwSource;
 
         csrRegressionSource = lib.fileset.toSource {
           root = ./hw;
@@ -98,15 +115,18 @@
           ];
         };
 
-        bridgeRegressionSource = lib.fileset.toSource {
+        localBridgeRegressionSource = lib.fileset.toSource {
           root = ./hw;
           fileset = lib.fileset.unions [
+            ./hw/src/hdl/axis_record_fifo_2.sv
             ./hw/src/hdl/axis_stream_fifo_2.sv
             ./hw/src/hdl/aurora_host_peer_bridge.sv
             ./hw/tb/axis_stream_fifo_2_tb.sv
             ./hw/tb/aurora_host_peer_bridge_tb.sv
           ];
         };
+
+        bridgeRegressionSource = addGeneratedQsh2Hdl "aurora-qsh2-bridge-regression-source" localBridgeRegressionSource;
 
         auroraCsrRegression =
           pkgs.runCommand "aurora-loopback-csr-regression"
@@ -179,15 +199,17 @@
                 --assert \
                 -Wall \
                 -Wno-fatal \
+                -Isource/src/hdl \
                 --top-module aurora_host_peer_bridge_tb \
                 --Mdir bridge_obj_dir \
-                source/src/hdl/axis_stream_fifo_2.sv \
+                source/src/hdl/qshell_record_first_beat.sv \
+                source/src/hdl/axis_record_fifo_2.sv \
                 source/src/hdl/aurora_host_peer_bridge.sv \
                 source/tb/aurora_host_peer_bridge_tb.sv
 
               ./bridge_obj_dir/Vaurora_host_peer_bridge_tb | tee -a regression.log
               grep -F \
-                "PASS: Aurora host/peer bridge preserves both directions, backpressure, and link epochs" \
+                "PASS: Aurora bridge validates atomic 13/56/65-beat QSH2 records, stalls, drops, and epochs" \
                 regression.log
 
               mkdir -p "$out"
@@ -305,28 +327,53 @@
           };
         };
 
-        auroraHwPackages = lib.optionalAttrs isX86_64 (
-          coyoteNix.lib.mkCoyoteBoardPackages {
-            inherit
-              pkgs
-              tools
-              coyoteRoot
-              hwSource
-              xilinxShareRoot
-              ;
-            xilinxShell = doctor.xilinxShell;
-            pnamePrefix = "aurora-qshell-peer-bridge";
-            projectName = "qshell_peer_bridge";
-            boards = {
-              u280 = {
-                inherit (doctor.boards.u280) xilinxVersion simXilinxVersion;
-                # The Aurora QSFP1 backend intentionally skips optional
-                # post-opt/place/phys-opt checkpoints to avoid Vivado 2023.2
-                # checkpoint/timing-archive crashes. Only final routed/static
-                # checkpoints are required artifacts.
-                skipIntermediateRouteCheckpoints = true;
-              };
-            };
+        u280Board = {
+          inherit (doctor.boards.u280) xilinxVersion simXilinxVersion;
+          # The Aurora QSFP1 backend intentionally skips optional
+          # post-opt/place/phys-opt checkpoints to avoid Vivado 2023.2
+          # checkpoint/timing-archive crashes. Only final routed/static
+          # checkpoints are required artifacts.
+          skipIntermediateRouteCheckpoints = true;
+          appCmakeFlags = [
+            "-DEN_TIMING_CHECK:STRING=0"
+            "-DIMPLEMENTATION_ENFORCE_TIMING:STRING=0"
+          ];
+        };
+
+        mkAuroraHwPackages =
+          board:
+          lib.optionalAttrs isX86_64 (
+            coyoteNix.lib.mkCoyoteBoardPackages {
+              inherit
+                pkgs
+                tools
+                coyoteRoot
+                hwSource
+                xilinxShareRoot
+                ;
+              xilinxShell = doctor.xilinxShell;
+              pnamePrefix = "aurora-qshell-peer-bridge";
+              projectName = "qshell_peer_bridge";
+              boards.u280 = board;
+            }
+          );
+
+        auroraHwPackages = mkAuroraHwPackages u280Board;
+
+        # Keep the historical diagnostic target unchanged. The distinct strict
+        # graph reuses the same static stages but gives every affected
+        # shell/application stage a unique name and fail-closed timing policy.
+        auroraStrictHwPackages = mkAuroraHwPackages (
+          u280Board
+          // {
+            simXilinxVersion = null;
+            synthPname = "aurora-qshell-peer-bridge-u280-strict-synth";
+            routedPname = "aurora-qshell-peer-bridge-u280-strict-routed";
+            finalPname = "aurora-qshell-peer-bridge-u280-strict";
+            appCmakeFlags = [
+              "-DEN_TIMING_CHECK:STRING=1"
+              "-DIMPLEMENTATION_ENFORCE_TIMING:STRING=1"
+            ];
           }
         );
 
@@ -478,6 +525,7 @@
         checks = {
           aurora-loopback-csr-regression = auroraCsrRegression;
           aurora-peer-bridge-stream-regression = auroraBridgeRegression;
+          aurora-qsh2-host-regression = auroraPeerHost;
           aurora-rose-qsh2-protocol-contract = roseProtocolContract;
         };
 
@@ -489,6 +537,7 @@
           vitis_hls = tools.vitis_hls;
         }
         // auroraHwPackages
+        // auroraStrictHwPackages
         // coyoteDriverPackages;
 
         apps = {

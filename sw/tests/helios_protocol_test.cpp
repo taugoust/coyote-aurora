@@ -169,6 +169,108 @@ int main() {
     return 1;
   }
 
+  const auto patterned_payload = [](std::size_t bytes, std::uint8_t salt) {
+    std::vector<std::uint8_t> payload(bytes);
+    for (std::size_t index = 0; index < payload.size(); ++index) {
+      payload[index] = static_cast<std::uint8_t>(
+          (index * 37u) ^ (index >> 3u) ^ salt);
+    }
+    return payload;
+  };
+  const auto wire_beats = [](std::size_t bytes) {
+    return (bytes + ::qshell::abi::beat_bytes - 1) /
+           ::qshell::abi::beat_bytes;
+  };
+  const auto final_valid_bytes = [](std::size_t bytes) {
+    const auto remainder = bytes % ::qshell::abi::beat_bytes;
+    return remainder == 0 ? ::qshell::abi::beat_bytes : remainder;
+  };
+
+  // The small d3 request remains one beat. The actual circuit-d9 request and
+  // result exercise the 13- and 56-beat boundaries, respectively; the result
+  // is 3,566 total bytes (48-byte header plus 3,518-byte payload).
+  const std::vector<std::uint8_t> d3_opaque_payload = {
+      0x01, 0x02, 0x10, 0x20, 0x30, 0x40};
+  const auto d3_opaque_wire =
+      aurora::qsh2::encode_record(opaque_request, d3_opaque_payload);
+  const auto d3_opaque_record = aurora::qsh2::decode_record(d3_opaque_wire);
+  if (d3_opaque_wire.size() != 54 || wire_beats(d3_opaque_wire.size()) != 1 ||
+      final_valid_bytes(d3_opaque_wire.size()) != 54 ||
+      d3_opaque_record.payload != d3_opaque_payload) {
+    std::cerr << "QSH2 d3 opaque framing changed\n";
+    return 1;
+  }
+
+  const auto d9_request_payload = patterned_payload(760, 0xa5);
+  const auto d9_request_wire =
+      aurora::qsh2::encode_record(opaque_request, d9_request_payload);
+  const auto d9_request_record =
+      aurora::qsh2::decode_record(d9_request_wire);
+  if (d9_request_wire.size() != 808 || wire_beats(d9_request_wire.size()) != 13 ||
+      final_valid_bytes(d9_request_wire.size()) != 40 ||
+      d9_request_record.payload != d9_request_payload ||
+      d9_request_wire.at(63) != d9_request_payload.at(15) ||
+      d9_request_wire.at(64) != d9_request_payload.at(16) ||
+      d9_request_wire.back() != d9_request_payload.back()) {
+    std::cerr << "QSH2 circuit-d9 request framing changed\n";
+    return 1;
+  }
+
+  auto truncated_d9_request = d9_request_wire;
+  truncated_d9_request.pop_back();
+  try {
+    (void)aurora::qsh2::decode_record(truncated_d9_request);
+    std::cerr << "QSH2 truncated circuit-d9 request was accepted\n";
+    return 1;
+  } catch (const std::runtime_error &) {
+  }
+
+  auto d9_response_header = opaque_request;
+  d9_response_header.record_class = static_cast<std::uint8_t>(
+      ::qshell::abi::record_class::correction);
+  d9_response_header.source_endpoint_id = 20;
+  d9_response_header.destination_endpoint_id = 0x80000001;
+  d9_response_header.route_version = 1;
+  const auto d9_response_payload = patterned_payload(3518, 0x5a);
+  const auto d9_response_wire =
+      aurora::qsh2::encode_record(d9_response_header, d9_response_payload);
+  const auto d9_response = aurora::qsh2::decode_record(d9_response_wire);
+  if (d9_response_wire.size() != 3566 ||
+      wire_beats(d9_response_wire.size()) != 56 ||
+      final_valid_bytes(d9_response_wire.size()) != 46 ||
+      d9_response.payload != d9_response_payload ||
+      d9_response_wire.at(63) != d9_response_payload.at(15) ||
+      d9_response_wire.at(64) != d9_response_payload.at(16) ||
+      d9_response_wire.back() != d9_response_payload.back()) {
+    std::cerr << "QSH2 circuit-d9 result framing changed\n";
+    return 1;
+  }
+  aurora::qsh2::validate_opaque_loopback_response(
+      d9_response, opaque_request, d9_response_payload, 20, 0x80000001, 1);
+
+  const auto maximum_payload = patterned_payload(
+      aurora::qsh2::bridge_max_payload_bytes, 0x3c);
+  const auto maximum_wire =
+      aurora::qsh2::encode_record(opaque_request, maximum_payload);
+  const auto maximum_record = aurora::qsh2::decode_record(maximum_wire);
+  if (aurora::qsh2::bridge_max_record_beats != 65 ||
+      maximum_wire.size() != 4144 || wire_beats(maximum_wire.size()) != 65 ||
+      final_valid_bytes(maximum_wire.size()) != 48 ||
+      maximum_record.payload != maximum_payload) {
+    std::cerr << "QSH2 maximum-size framing changed\n";
+    return 1;
+  }
+
+  try {
+    (void)aurora::qsh2::encode_record(
+        opaque_request,
+        std::vector<std::uint8_t>(
+            aurora::qsh2::bridge_max_payload_bytes + 1, 0xa5));
+    std::cerr << "QSH2 record beyond the bridge bound was accepted\n";
+    return 1;
+  } catch (const std::runtime_error &) {
+  }
+
   const std::vector<std::uint8_t> expected_opaque_rx = {
       0x51, 0x53, 0x48, 0x32, 0x02, 0x02, 0x01, 0x00, 0x30, 0x00, 0x00,
       0x00, 0x08, 0x00, 0x00, 0x00, 0x34, 0x12, 0x00, 0x00, 0x01, 0x00,

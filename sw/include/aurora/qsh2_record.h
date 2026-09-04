@@ -1,11 +1,20 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
 #include <qshell/qshell_abi_generated.hpp>
 
 namespace aurora::qsh2 {
+
+inline constexpr std::size_t bridge_max_payload_bytes = 4096;
+inline constexpr std::size_t bridge_max_record_bytes =
+    ::qshell::abi::header_bytes + bridge_max_payload_bytes;
+inline constexpr std::size_t bridge_max_record_beats =
+    (bridge_max_record_bytes + ::qshell::abi::beat_bytes - 1) /
+    ::qshell::abi::beat_bytes;
+static_assert(bridge_max_record_beats == 65);
 
 struct RecordHeader {
     std::uint32_t context_id = 0;

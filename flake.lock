@@ -3,17 +3,17 @@
     "coyote": {
       "flake": false,
       "locked": {
-        "lastModified": 1788167858,
-        "narHash": "sha256-gcI8O8zDu4JRiBBZ1PZaDYFjboDF5noAwID4CbekpHY=",
+        "lastModified": 1788445984,
+        "narHash": "sha256-LfwU4gWG5Qy55cbi1GOm4fsYjvvvg2Tp7P1/11I1GRs=",
         "owner": "taugoust",
         "repo": "Coyote",
-        "rev": "6b9b0ae2b2928d9d0c9afce4313fcec3f128b705",
+        "rev": "dc614541f6e060232489dfcfd0e037363f16f48e",
         "type": "github"
       },
       "original": {
         "owner": "taugoust",
         "repo": "Coyote",
-        "rev": "6b9b0ae2b2928d9d0c9afce4313fcec3f128b705",
+        "rev": "dc614541f6e060232489dfcfd0e037363f16f48e",
         "type": "github"
       }
     },
@@ -30,17 +30,17 @@
         ]
       },
       "locked": {
-        "lastModified": 1787737254,
-        "narHash": "sha256-P/qr71XsmwNED6Cam9ieiBMbBCuBhRzbitw90ymuW8U=",
+        "lastModified": 1788444670,
+        "narHash": "sha256-5MrqmNKKkPjdCqMxyNyZj/IE2ChzLAma94jBBdQFfQU=",
         "owner": "TUM-DSE",
         "repo": "coyote-nix",
-        "rev": "ebbfd901ab48817525b55f254e9b8ed65bbd8049",
+        "rev": "4f05f2e47282df3c0f9e004021df1bb9fd76132a",
         "type": "github"
       },
       "original": {
         "owner": "TUM-DSE",
-        "ref": "master",
         "repo": "coyote-nix",
+        "rev": "4f05f2e47282df3c0f9e004021df1bb9fd76132a",
         "type": "github"
       }
     },
@@ -833,17 +833,17 @@
     "qshell": {
       "flake": false,
       "locked": {
-        "lastModified": 1788374313,
-        "narHash": "sha256-TbEI1NDbuMvVAkj6sGB6U/opNItUL4pHrEy9WiJZzrs=",
-        "ref": "master",
-        "rev": "e9cfaabae0abfc779bcd3ca4c8974778f73720df",
-        "revCount": 100,
+        "lastModified": 1788447526,
+        "narHash": "sha256-nDi5C7hgbRiGV755DCpmJApi84AkuCTeRRuxNEEfhlk=",
+        "ref": "aurora-d3-runtime-stack",
+        "rev": "18062942cbdf12dd124e740338ba72530f589e0b",
+        "revCount": 103,
         "type": "git",
         "url": "ssh://git@github.com/TUM-DSE/QShell.git"
       },
       "original": {
-        "ref": "master",
-        "rev": "e9cfaabae0abfc779bcd3ca4c8974778f73720df",
+        "ref": "aurora-d3-runtime-stack",
+        "rev": "18062942cbdf12dd124e740338ba72530f589e0b",
         "type": "git",
         "url": "ssh://git@github.com/TUM-DSE/QShell.git"
       }

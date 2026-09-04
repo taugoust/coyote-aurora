@@ -91,6 +91,9 @@ std::vector<std::uint8_t> encode_record(
         throw std::runtime_error("unknown QSH2 record class");
     }
     validate_flags(header.record_class, header.flags);
+    if (payload.size() > bridge_max_payload_bytes) {
+        throw std::runtime_error("QSH2 payload exceeds the Aurora bridge record bound");
+    }
     if (payload.size() > std::numeric_limits<std::uint32_t>::max()) {
         throw std::runtime_error("QSH2 payload exceeds its encoded length field");
     }
@@ -165,6 +168,9 @@ Record decode_record(const std::vector<std::uint8_t>& bytes) {
         read_u32_le(bytes, offset::record_sequence);
 
     validate_flags(record.header.record_class, record.header.flags);
+    if (record.header.payload_bytes > bridge_max_payload_bytes) {
+        throw std::runtime_error("QSH2 payload exceeds the Aurora bridge record bound");
+    }
     if (record.header.payload_bytes > bytes.size() - header_bytes) {
         throw std::runtime_error("QSH2 record payload length exceeds available bytes");
     }

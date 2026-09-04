@@ -1,6 +1,6 @@
 # Aurora QShell peer bridge
 
-This repository provides the Clara-side endpoint for end-to-end QShell peer-path tests over the existing Rose ↔ Clara QSFP1 cable. It supports both a Helios d3 decode and a one-beat opaque-loopback oracle for isolating QShell control and peer routing from decoder behavior.
+This repository provides the Clara-side endpoint for end-to-end QShell peer-path tests over the existing Rose ↔ Clara QSFP1 cable. It supports a Helios d3 decode and bounded multi-beat opaque-loopback records for isolating QShell control and peer routing from decoder behavior.
 
 ## Architecture
 
@@ -21,17 +21,20 @@ Clara runs a Coyote image with a transparent bidirectional bridge. The legacy He
 
 The Clara datapath is:
 
-- host receive → two-entry registered queue → Aurora transmit;
-- Aurora receive → two-entry registered queue → host transmit.
+- host receive → two-record atomic queue → Aurora transmit;
+- Aurora receive → two-record atomic queue → host transmit.
 
-The queues preserve `tdata`, `tkeep`, and `tlast`, isolate downstream ready paths, and sustain one beat per cycle without stalls. This initial bridge accepts only complete one-beat records, matching Helios d3 and the opaque oracle. A request queued toward a failed link is discarded; a complete correction already accepted from Aurora remains a valid host transfer and is never retracted under host backpressure.
+Each queue accepts the full 4,096-byte QSH2 payload bound: the generated 48-byte header/64-byte beat geometry makes this at most 65 beats. It validates the generated common header, exact declared payload length, contiguous low-lane `tkeep`, and the exact final `tlast` before committing anything. Malformed or over-bound records are drained and dropped atomically. Accepted records preserve the complete `tdata` vector without byte or half-vector transformation and sustain one beat per cycle. Two banks allow the next record to be captured while the current record drains and isolate downstream ready paths.
 
-The Clara Coyote input is pinned to revision `6b9b0ae2b2928d9d0c9afce4313fcec3f128b705`. This matches the four-lane 25.78125 Gb/s Aurora framing, 512-bit shell CDC, QSFP1 constraints, and Immediate NFC configuration used by both the legacy Rose image and its descendant resident-control repair. Host-side QSH2 encoding and validation consume the generated ABI header from pinned QShell revision `e9cfaabae0abfc779bcd3ca4c8974778f73720df`; this repository does not define a second set of record constants or offsets.
+At link loss, queued host requests and an incomplete peer response are flushed. If host DMA is partway through a request, its old-epoch remainder is accepted and discarded through `tlast`, including if the link reconnects first. A complete correction already accepted from Aurora remains a valid host record and is never retracted under host backpressure.
+
+The Clara Coyote input is pinned to published runtime-stack revision `dc614541f6e060232489dfcfd0e037363f16f48e`. This retains the four-lane 25.78125 Gb/s Aurora framing, 512-bit shell CDC, QSFP1 constraints, Immediate NFC configuration, current narrow control behavior, and driver cleanup used by the matching Rose stack. Host and RTL QSH2 encoding/framing consume generated ABI files from pinned QShell runtime-stack revision `18062942cbdf12dd124e740338ba72530f589e0b`; this repository does not define a second set of wire constants or offsets.
 
 ## Device-free validation
 
 ```bash
 nix build -L .#checks.x86_64-linux.aurora-peer-bridge-stream-regression
+nix build -L .#checks.x86_64-linux.aurora-qsh2-host-regression
 nix build -L .#checks.x86_64-linux.aurora-loopback-csr-regression
 nix build -L .#checks.x86_64-linux.aurora-rose-qsh2-protocol-contract
 nix build -L .#aurora-qshell-peer-host
@@ -40,11 +43,11 @@ nix flake check --no-build
 
 ## Build the Clara image
 
-Run the physical build on Rose or another configured build host:
+The existing target remains a diagnostic, non-strict build. The separately named strict target enables both Coyote timing checks and implementation enforcement:
 
 ```bash
-nix build -L .#aurora-qshell-peer-bridge-u280 \
-  -o result-qshell-peer-bridge-u280 --keep-failed
+nix build -L .#aurora-qshell-peer-bridge-u280-strict \
+  -o result-qshell-peer-bridge-u280-strict --keep-failed
 ```
 
 A successful Nix command is not sufficient acceptance. Before deployment, inspect the package's canonical timing, routing, DRC, and bitstream reports and require non-negative setup and hold slack, complete routing, and no error-level bitstream DRC findings.
@@ -88,7 +91,7 @@ Do not run this Clara deployment sequence on Rose. Any Rose personality change i
 
 ## Run the opaque-loopback oracle
 
-First configure Rose service endpoint `20` as available with a one-beat exclusive scheduler. Install capability `1` for context `4660`, physical peer source/correction endpoint `0x80000001`, initial round/version `1/1`, and use `QSHELL_SCHEMA_OPAQUE_LOOPBACK` (`0x00000001`) for both syndrome and correction schemas.
+First configure Rose service endpoint `20` as available with an exclusive scheduler whose maximum record-beat count covers the request (one for the default payload, 13 for the 760-byte circuit-d9 request payload, or 65 for the bridge maximum). Install capability `1` for context `4660`, physical peer source/correction endpoint `0x80000001`, initial round/version `1/1`, and use `QSHELL_SCHEMA_OPAQUE_LOOPBACK` (`0x00000001`) for both syndrome and correction schemas.
 
 Then run on Clara:
 
@@ -99,6 +102,19 @@ Then run on Clara:
   --service-endpoint 20 --payload-hex a55a00ff11223344 \
   --device 0 --timeout-ms 2000 --verbose
 ```
+
+A compact 47-byte framing smoke produces a 95-byte, two-beat record:
+
+```bash
+/nix/store/<host-output>/bin/aurora-qshell-loopback \
+  --context 4660 --round 1 --route 1 --route-version 1 \
+  --wire-source 305419896 --peer-endpoint 2147483649 \
+  --service-endpoint 20 \
+  --payload-hex 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e \
+  --device 0 --timeout-ms 2000 --verbose
+```
+
+The actual MicroBlossom circuit-d9 request is 808 total bytes (760-byte payload, 13 beats), while its maximum result is 3,566 total bytes (3,518-byte payload, 56 beats). The bridge regression exercises both boundaries plus the 4,096-byte payload/65-beat maximum; the compact command above is only a convenient framing smoke.
 
 The oracle requires current ABI magic/version, correction class, opaque schema, preserved context/round/capability/flags/payload, service source endpoint `20`, authenticated peer destination `0x80000001`, active route version `1`, and correction sequence zero. The deliberately different wire source proves Rose replaced the untrusted ingress source before service dispatch.
 

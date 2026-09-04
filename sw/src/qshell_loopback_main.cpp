@@ -62,7 +62,7 @@ int run_main(int argc, char* argv[]) {
     options.add_options()
         ("help,h", "Show help")
         ("payload-hex", po::value<std::string>(&payload_hex)->default_value(payload_hex),
-            "Opaque payload bytes; at most 16 bytes")
+            "Opaque payload bytes; up to the 4,096-byte/65-beat bridge bound")
         ("context", po::value<std::uint32_t>(&context_id)->default_value(context_id),
             "QShell context id")
         ("round", po::value<std::uint32_t>(&round_id)->default_value(round_id),
@@ -109,10 +109,8 @@ int run_main(int argc, char* argv[]) {
     }
 
     const auto payload = parse_hex_bytes(payload_hex);
-    const auto payload_capacity =
-        ::qshell::abi::beat_bytes - ::qshell::abi::header_bytes;
-    if (payload.size() > payload_capacity) {
-        throw std::runtime_error("payload exceeds the one-beat QSH2 capacity");
+    if (payload.size() > aurora::qsh2::bridge_max_payload_bytes) {
+        throw std::runtime_error("payload exceeds the Aurora bridge record bound");
     }
 
     aurora::qsh2::RecordHeader request;
@@ -129,9 +127,6 @@ int run_main(int argc, char* argv[]) {
         ::qshell::abi::record_class::syndrome);
 
     const auto tx = aurora::qsh2::encode_record(request, payload);
-    if (tx.size() > ::qshell::abi::beat_bytes) {
-        throw std::runtime_error("opaque-loopback request is not one complete QSH2 beat");
-    }
 
     helios::HeliosCoyoteTransport transport(
         0,
@@ -140,7 +135,7 @@ int run_main(int argc, char* argv[]) {
         std::chrono::milliseconds(timeout_ms));
     const auto rx = transport.roundtrip(
         tx,
-        ::qshell::abi::beat_bytes,
+        tx.size(),
         std::chrono::milliseconds(timeout_ms),
         false);
     const auto response = aurora::qsh2::decode_record(rx);

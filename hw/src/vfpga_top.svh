@@ -4,11 +4,12 @@
  *   axis_host_recv[0] -> registered queue -> axis_peer_send[0]
  *   axis_peer_recv[0] -> registered queue -> axis_host_send[0]
  *
- * The queues preserve data, keep, and record boundaries while preventing a
- * combinational ready path between PCIe host streams and the Aurora backend.
- * This initial bridge accepts complete one-beat records only. Link loss drops
- * queued host requests but never retracts a complete response already offered
- * to the host. The QSH2 d3 workload uses one beat per record.
+ * The queues preserve opaque whole-vector data, keep, and record boundaries
+ * while preventing a combinational ready path between PCIe host streams and
+ * the Aurora backend. Generated QSH2 geometry bounds the 4,096-byte payload to
+ * 65 beats; only fully validated records commit. Link loss drops queued host
+ * requests and incomplete peer responses, drains an interrupted host record,
+ * and never retracts a complete peer response.
  */
 
 logic [63:0] ctrl_reg;
