@@ -523,6 +523,23 @@
           }
         );
 
+        # Preserve routed timing reports and artifacts even when an exploratory
+        # 250 MHz implementation misses timing. This graph has distinct stage
+        # names so it cannot be confused with the fail-closed strict target.
+        auroraNonstrictHwPackages = mkAuroraHwPackages (
+          u280Board
+          // {
+            simXilinxVersion = null;
+            synthPname = "aurora-qshell-peer-bridge-u280-nonstrict-synth";
+            routedPname = "aurora-qshell-peer-bridge-u280-nonstrict-routed";
+            finalPname = "aurora-qshell-peer-bridge-u280-nonstrict";
+            appCmakeFlags = [
+              "-DEN_TIMING_CHECK:STRING=0"
+              "-DIMPLEMENTATION_ENFORCE_TIMING:STRING=0"
+            ];
+          }
+        );
+
         coyoteDriverPackages = lib.optionalAttrs isX86_64 (
           deploymentCoyoteNix.lib.mkCoyoteDriverPackages {
             pkgs = driverPkgs;
@@ -686,6 +703,7 @@
         }
         // auroraHwPackages
         // auroraStrictHwPackages
+        // auroraNonstrictHwPackages
         // coyoteDriverPackages;
 
         apps = {
