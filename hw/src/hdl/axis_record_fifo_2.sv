@@ -67,10 +67,10 @@ module axis_record_fifo_2 #(
     logic [KEEP_W-1:0] expected_continuation_keep;
     logic expected_continuation_last;
     logic continuation_valid;
+    (* keep = "true" *) logic store_first_beat;
+    logic store_input_beat;
     logic accepted_first_beat;
-    logic accepted_continuation;
     logic accepted_single_beat;
-    logic publish_record;
 
     qshell_record_first_beat inst_first_beat_checker (
         .data(s_tdata),
@@ -119,6 +119,16 @@ module axis_record_fifo_2 #(
         end
     end
 
+    // The first word is captured while its compact framing state is validated
+    // in parallel. Keeping private payload storage independent from the
+    // commit decision prevents header/TKEEP arithmetic from driving every bit
+    // of the collision-bypass register. The payload is observable only when
+    // single_beat_prefetch_valid and bank_complete commit the record.
+    always_ff @(posedge aclk) begin
+        if (store_first_beat)
+            single_beat_prefetch_data[write_bank] <= memory_write_data;
+    end
+
     always_comb begin : stream_control
         int expected_valid_bytes;
 
@@ -148,30 +158,29 @@ module axis_record_fifo_2 #(
                              s_tkeep == expected_continuation_keep &&
                              s_tlast == expected_continuation_last;
 
-        accepted_first_beat = input_fire && !discarding && !capture_active &&
-                              first_valid &&
+        store_input_beat = input_fire && !discarding;
+        store_first_beat = store_input_beat && !capture_active;
+        accepted_first_beat = store_first_beat && first_valid &&
                               first_payload_bytes <= MAX_PAYLOAD_BYTES;
-        accepted_continuation = input_fire && !discarding && capture_active &&
-                                int'(capture_index) < MAX_RECORD_BEATS &&
-                                continuation_valid;
         accepted_single_beat = accepted_first_beat && first_record_complete;
-        publish_record = accepted_single_beat ||
-                         (accepted_continuation && s_tlast);
 
         memory_write_enable = '0;
-        memory_write_address = accepted_continuation ? capture_index : '0;
+        memory_write_address = capture_active ? capture_index : '0;
         memory_write_data = {s_tlast, s_tkeep, s_tdata};
         memory_read_enable = '0;
         memory_read_address = '0;
 
-        if (accepted_first_beat || accepted_continuation)
+        // A bank is private from its first accepted word until commit or
+        // rejection, so writing a candidate word before its framing decision
+        // cannot expose malformed data. This deliberately keeps all wide BRAM
+        // write enables off the header/TKEEP validity cone.
+        if (store_input_beat)
             memory_write_enable[write_bank] = 1'b1;
 
-        // A complete multi-beat record prefetches beat zero on its publication
-        // edge. A one-beat record is written to the same address on that edge,
-        // so its bank-local registered bypass supplies deterministic write/read
-        // collision behavior without compromising the canonical RAM template.
-        if (publish_record && !accepted_single_beat) begin
+        // A candidate final continuation can prefetch address zero regardless
+        // of whether that continuation ultimately commits. Invalid records
+        // leave bank_complete clear and the speculative read is inaccessible.
+        if (store_input_beat && capture_active && s_tlast) begin
             memory_read_enable[write_bank] = 1'b1;
             memory_read_address[write_bank] = '0;
         end
@@ -226,6 +235,11 @@ module axis_record_fifo_2 #(
                     discarding <= 1'b0;
             end else if (input_fire) begin
                 if (!capture_active) begin
+                    // Payload capture above is independent of this compact
+                    // commit decision. An invalid or multi-beat candidate must
+                    // not retain a stale single-beat selector.
+                    single_beat_prefetch_valid[write_bank] <=
+                        accepted_single_beat;
                     if (!first_valid ||
                         first_payload_bytes > MAX_PAYLOAD_BYTES) begin
                         // A malformed first beat that already carries TLAST is
@@ -234,11 +248,7 @@ module axis_record_fifo_2 #(
                         discarding <= !s_tlast;
                     end else begin
                         bank_reserved[write_bank] <= 1'b1;
-                        single_beat_prefetch_valid[write_bank] <=
-                            first_record_complete;
                         if (first_record_complete) begin
-                            single_beat_prefetch_data[write_bank] <=
-                                memory_write_data;
                             bank_complete[write_bank] <= 1'b1;
                             write_bank <= !write_bank;
                         end else begin

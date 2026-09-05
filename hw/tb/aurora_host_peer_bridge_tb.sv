@@ -51,6 +51,10 @@ module aurora_host_peer_bridge_tb;
     beat_t expected_peer[$];
     integer host_transfer_cycles[$];
     integer peer_transfer_cycles[$];
+    time host_transfer_times[$];
+    time peer_transfer_times[$];
+    time host_first_record_accept_time;
+    time peer_first_record_accept_time;
     integer cycle_count;
     integer host_received;
     integer peer_received;
@@ -290,6 +294,8 @@ module aurora_host_peer_bridge_tb;
                 @(posedge clk);
                 if (!host_in_ready)
                     fail("continuous host records were backpressured");
+                if (record_index == 0 && beat_index == 0)
+                    host_first_record_accept_time = $time;
                 expected_peer.push_back(beat);
                 @(negedge clk);
             end
@@ -325,6 +331,8 @@ module aurora_host_peer_bridge_tb;
                 @(posedge clk);
                 if (!peer_in_ready)
                     fail("continuous peer records were backpressured");
+                if (record_index == 0 && beat_index == 0)
+                    peer_first_record_accept_time = $time;
                 expected_host.push_back(beat);
                 @(negedge clk);
             end
@@ -392,6 +400,7 @@ module aurora_host_peer_bridge_tb;
                     host_out_last !== expected.last)
                     fail("peer-to-host whole vector, keep, last, or order changed");
                 host_transfer_cycles.push_back(cycle_count);
+                host_transfer_times.push_back($time);
                 host_received++;
             end
             if (peer_out_valid && peer_out_ready) begin
@@ -403,6 +412,7 @@ module aurora_host_peer_bridge_tb;
                     peer_out_last !== expected.last)
                     fail("host-to-peer whole vector, keep, last, or order changed");
                 peer_transfer_cycles.push_back(cycle_count);
+                peer_transfer_times.push_back($time);
                 peer_received++;
             end
         end
@@ -620,6 +630,9 @@ module aurora_host_peer_bridge_tb;
             D3_PAYLOAD_BYTES, 8'h3c,
             D3_PAYLOAD_BYTES, 8'h3d);
         wait_for_counts(host_before, peer_before + 2);
+        if (peer_transfer_times[peer_cycle_index] !=
+            host_first_record_accept_time + 10ns)
+            fail("one-beat host record changed registered commit latency");
         if (peer_transfer_cycles[peer_cycle_index + 1] !=
             peer_transfer_cycles[peer_cycle_index] + 1)
             fail("continuous one-beat host records inserted a bubble");
@@ -629,6 +642,9 @@ module aurora_host_peer_bridge_tb;
             D3_PAYLOAD_BYTES, 8'hbc,
             D3_PAYLOAD_BYTES, 8'hbd);
         wait_for_counts(host_before + 2, peer_before + 2);
+        if (host_transfer_times[host_cycle_index] !=
+            peer_first_record_accept_time + 10ns)
+            fail("one-beat peer record changed registered commit latency");
         if (host_transfer_cycles[host_cycle_index + 1] !=
             host_transfer_cycles[host_cycle_index] + 1)
             fail("continuous one-beat peer records inserted a bubble");
