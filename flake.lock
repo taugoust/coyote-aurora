@@ -38,15 +38,15 @@
       "locked": {
         "lastModified": 1787737770,
         "narHash": "sha256-sUZePcgqGDkavEp7eMDWjtRlC1iYZ7QOb4UMF6i3MTI=",
-        "owner": "taugoust",
-        "repo": "Coyote",
+        "owner": "TUM-DSE",
+        "repo": "coyote",
         "rev": "e37f5a5026a3455fc819123413b3c6010cc6da3a",
         "type": "github"
       },
       "original": {
-        "owner": "taugoust",
-        "ref": "peer-streams",
-        "repo": "Coyote",
+        "owner": "TUM-DSE",
+        "ref": "archive/peer-streams",
+        "repo": "coyote",
         "type": "github"
       }
     },

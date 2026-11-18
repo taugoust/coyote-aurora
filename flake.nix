@@ -5,7 +5,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
     flake-utils.url = "github:numtide/flake-utils";
     coyote = {
-      url = "github:taugoust/Coyote/peer-streams";
+      url = "github:TUM-DSE/coyote/archive/peer-streams";
       flake = false;
     };
     coyote-nix = {
